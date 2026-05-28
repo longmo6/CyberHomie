@@ -80,6 +80,8 @@ class GroupState:
     next_session_time: float = 0.0    # 下次随机出没的时间戳
     buffer: List[BufferedMessage] = field(default_factory=list)  # 消息缓冲区
     eval_task: Optional[asyncio.Task] = None  # 定时评估任务
+    fatigue: float = 0.0              # 疲惫值 0-100，越高越敷衍
+    reply_count: int = 0              # 本轮活跃期已回复次数
 
 
 class Humanizer:
@@ -132,11 +134,19 @@ class Humanizer:
         return max(0.0, state.engagement - decay)
 
     def notify_bot_replied(self, group_id: int):
-        """bot 回复后提升参与度，保持对话连贯"""
+        """bot 回复后提升参与度，同时增加疲惫值"""
         state = self._get_state(group_id)
         current = self.get_current_engagement(group_id)
         state.engagement = min(100, current + 20)
         state.engage_set_time = time.time()
+        state.reply_count += 1
+        # 每次回复增加疲惫，回复越多越疲惫
+        state.fatigue = min(100, state.fatigue + 8 + state.reply_count * 2)
+
+    def get_fatigue(self, group_id: int) -> float:
+        """获取当前疲惫值"""
+        state = self._get_state(group_id)
+        return state.fatigue
 
     # ============================================================
     # 消息缓冲 + 评估
@@ -287,6 +297,8 @@ class Humanizer:
                 state.session_active_until = now + duration * 60
                 state.engagement = engage
                 state.engage_set_time = now
+                state.fatigue = 0
+                state.reply_count = 0
                 logger.info("[Group %d] Session started, %d min (engagement=%d)",
                             group_id, duration, engage)
                 return True
@@ -313,11 +325,12 @@ class Humanizer:
             eng = self.get_current_engagement(group_id)
             state = self._get_state(group_id)
             buf_len = len(state.buffer)
-            night = " [深夜模式]" if self._is_night() else ""
+            fat = state.fatigue
+            night = " [深夜]" if self._is_night() else ""
             if eng > 50:
-                return f"ACTIVE (engagement={eng:.0f}, buffer={buf_len}){night}"
+                return f"ACTIVE (engagement={eng:.0f}, fatigue={fat:.0f}, buffer={buf_len}){night}"
             if eng > 0:
-                return f"Cooling (engagement={eng:.0f}, buffer={buf_len}){night}"
+                return f"Cooling (engagement={eng:.0f}, fatigue={fat:.0f}, buffer={buf_len}){night}"
             if state.session_active_until and time.time() < state.session_active_until:
                 return f"Random session (buffer={buf_len}){night}"
             if state.next_session_time:

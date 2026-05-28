@@ -212,10 +212,14 @@ async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: f
 
     sys_prompt = personality.get_system_prompt(user_ctx, "\n".join(group_ctx_list))
 
+    fatigue = humanizer.get_fatigue(group_id)
     if engagement > 70:
-        sys_prompt += "\n\n你现在很积极，正在参与讨论。大部分消息都可以回复。"
+        if fatigue > 60:
+            sys_prompt += "\n\n你正在参与讨论，但已经有点累了。回复变短变敷衍，可以只回半句或表情。"
+        else:
+            sys_prompt += "\n\n你现在比较积极，可以参与讨论。但不要每条都回，选择有意思的回。"
     elif engagement > 30:
-        sys_prompt += "\n\n你正在慢慢退出聊天，只回复有意思的消息或直接问你的。"
+        sys_prompt += "\n\n你正在慢慢退出聊天，只回复直接问你的或者特别有意思的。可以敷衍。"
     else:
         sys_prompt += "\n\n你已经不太想聊了，除非有特别有意思的内容否则不回复。"
 
