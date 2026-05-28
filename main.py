@@ -1,4 +1,5 @@
 import asyncio
+import random
 import subprocess
 import sys
 import time
@@ -112,8 +113,9 @@ async def topic_loop():
 
 # --- Typing delay ---
 async def typing_delay(text: str):
-    """Simulate typing delay based on reply length."""
-    delay = min(5.0, max(1.0, len(text) * 0.1))
+    """模拟打字延迟：每字0.3秒，范围2-8秒，加随机波动"""
+    base = len(text) * 0.3
+    delay = min(8.0, max(2.0, base)) + random.uniform(0.5, 2.0)
     await asyncio.sleep(delay)
 
 
