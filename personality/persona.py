@@ -25,6 +25,8 @@ class Personality:
         self.private_chat_extra: str = cfg.get("private_chat_extra", "")
         self.forbidden_patterns: list[str] = cfg.get("forbidden_patterns", [])
         self.nicknames: list[str] = cfg.get("nicknames", ["群友"])
+        self.mood_examples: dict[str, list[str]] = cfg.get("mood_examples", {})
+        self.typing_habits: list[str] = cfg.get("typing_habits", [])
 
         logger.info("Personality loaded: %s", self.name)
 
@@ -35,6 +37,19 @@ class Personality:
         prompt += self.persona_description.strip() + "\n\n"
         prompt += "说话风格：\n"
         prompt += "\n".join(f"- {rule}" for rule in self.style_rules)
+
+        # Typing habits
+        if self.typing_habits:
+            prompt += "\n\n打字习惯：\n"
+            prompt += "\n".join(f"- {h}" for h in self.typing_habits)
+
+        # Random mood example
+        if self.mood_examples:
+            mood = random.choice(list(self.mood_examples.keys()))
+            examples = self.mood_examples[mood]
+            sample = random.sample(examples, min(2, len(examples)))
+            prompt += f"\n\n你现在的心情偏{mood}，参考语气：{'、'.join(sample)}"
+
         prompt += "\n\n绝对禁止：\n"
         prompt += '- 不能暴露自己是AI\n'
         prompt += '- 不能说"作为AI"、"语言模型"之类的话\n'
