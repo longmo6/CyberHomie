@@ -58,10 +58,7 @@ async def on_session_end(group_id: int):
         "ORDER BY last_seen DESC LIMIT 20"
     )
     for qq_id, nickname in rows:
-        print(f"[Memory] Summarizing user: {nickname} ({qq_id})...")
         await user_file_memory.summarize_and_save(qq_id, nickname)
-        print(f"[Memory] Saved: data/memory/{qq_id}.md")
-    print(f"[Memory] Summarizing group {group_id}...")
     await group_file_memory.summarize_and_save(group_id)
     print("[Memory] Done.\n")
 

@@ -78,14 +78,14 @@ class UserFileMemory:
             resp = await self.llm_client.client.chat.completions.create(
                 model=self.llm_client.model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=500,
+                max_tokens=2048,
                 temperature=0.7,
             )
             content = resp.choices[0].message.content
             if content:
                 self.save(qq_id, content.strip())
                 logger.info("Memory summarized for %s (%s)", nickname, qq_id)
-                print(f"[Memory] {nickname}: {content.strip()[:80]}...")
+                print(f"[Memory] {nickname} ({qq_id}) saved")
         except Exception as e:
             logger.error("Failed to summarize memory for %s: %s", nickname, e)
 

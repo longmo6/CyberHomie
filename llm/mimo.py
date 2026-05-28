@@ -44,7 +44,7 @@ class LLMClient:
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=200,
+                max_tokens=512,
                 temperature=0.85,
                 top_p=0.9,
             )
@@ -68,7 +68,7 @@ class LLMClient:
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=300,
+                max_tokens=1024,
                 temperature=0.7,
             )
             content = resp.choices[0].message.content
@@ -92,7 +92,7 @@ class LLMClient:
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=300,
+                max_tokens=1024,
                 temperature=0.7,
                 response_format={"type": "json_object"},
             )

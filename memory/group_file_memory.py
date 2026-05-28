@@ -74,13 +74,14 @@ class GroupFileMemory:
             resp = await self.llm_client.client.chat.completions.create(
                 model=self.llm_client.model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=600,
+                max_tokens=2048,
                 temperature=0.7,
             )
             content = resp.choices[0].message.content
             if content:
                 self.save(group_id, content.strip())
                 logger.info("Group memory summarized for group %s", group_id)
+                print(f"[Memory] Group {group_id} saved")
                 print(f"[Memory] Group {group_id} memory updated")
         except Exception as e:
             logger.error("Failed to summarize group memory: %s", e)
