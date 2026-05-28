@@ -18,15 +18,27 @@ class LLMClient:
         )
         self.model = settings.mimo_model
 
+    @staticmethod
+    def _build_content(text: str, images: list[str] = None) -> str | list:
+        """Build multimodal content if images are present."""
+        if not images:
+            return text
+        content = []
+        for url in images:
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        content.append({"type": "text", "text": text})
+        return content
+
     async def generate_reply(
         self,
         system_prompt: str,
         chat_history: list[dict],
         user_message: str,
+        images: list[str] = None,
     ) -> str:
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(chat_history[-10:])
-        messages.append({"role": "user", "content": user_message})
+        messages.append({"role": "user", "content": self._build_content(user_message, images)})
 
         try:
             resp = await self.client.chat.completions.create(
@@ -101,10 +113,14 @@ class LLMClient:
         Given buffered messages, decide which to reply to.
         Returns list of {"message_id": int, "text": str, "quote": bool}
         """
+        # Build message list, noting which have images
         msg_list = ""
+        all_images = []
         for m in buffered:
             at_tag = " [@bot]" if m.get("is_at_bot") else ""
-            msg_list += f'[id={m["message_id"]}] {m["nickname"]}{at_tag}: {m["text"]}\n'
+            img_tag = " [含图片]" if m.get("images") else ""
+            msg_list += f'[id={m["message_id"]}] {m["nickname"]}{at_tag}{img_tag}: {m["text"]}\n'
+            all_images.extend(m.get("images", []))
 
         prompt = (
             "以下是你所在群聊最近的消息。你是群里的老群友，性格温和软糯，不是助手。\n"
@@ -117,7 +133,8 @@ class LLMClient:
             "- 别人@了其他人的问题不要回答，那是问别人的\n"
             "- 不要每条都回，安静潜水是常态\n"
             "- 性格温和，不要骂人不要攻击\n"
-            "- 被质疑是AI时要装傻\n\n"
+            "- 被质疑是AI时要装傻\n"
+            "- 如果有人发了图片，可以根据图片内容回应\n\n"
             "引用回复规则（非常重要）：\n"
             "- 绝大多数回复不要引用（quote=false），直接说就行\n"
             "- 只有被@的时候才引用回复（quote=true）\n"
@@ -132,7 +149,10 @@ class LLMClient:
 
         messages_for_llm = [{"role": "system", "content": system_prompt}]
         messages_for_llm.extend(messages[-10:])
-        messages_for_llm.append({"role": "user", "content": prompt})
+        messages_for_llm.append({
+            "role": "user",
+            "content": self._build_content(prompt, all_images if all_images else None),
+        })
 
         try:
             resp = await self.client.chat.completions.create(

@@ -182,6 +182,7 @@ async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: f
             "nickname": m.nickname,
             "text": m.text,
             "is_at_bot": m.is_at_bot,
+            "images": m.images,
         }
         for m in messages
     ]
@@ -297,6 +298,7 @@ async def handle_group_message(event: GroupMessageEvent):
             "nickname": m.nickname,
             "text": m.text,
             "is_at_bot": m.is_at_bot,
+            "images": m.images,
         }
         for m in pending
     ]
@@ -345,7 +347,10 @@ async def handle_private_message(event: PrivateMessageEvent):
             chat_history.append({"role": "user", "content": msg["content"]})
 
     sys_prompt = personality.get_private_system_prompt(user_ctx)
-    reply = await llm_client.generate_reply(sys_prompt, chat_history, event.raw_text)
+    reply = await llm_client.generate_reply(
+        sys_prompt, chat_history, event.raw_text,
+        images=event.images if event.images else None,
+    )
     if not reply:
         return
     if personality.check_forbidden(reply):

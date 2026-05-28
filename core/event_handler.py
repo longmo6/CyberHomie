@@ -21,6 +21,11 @@ class GroupMessageEvent:
     is_at_bot: bool
     timestamp: int
     sender_role: str
+    images: list = None  # list of image URLs
+
+    def __post_init__(self):
+        if self.images is None:
+            self.images = []
 
 
 @dataclass
@@ -32,6 +37,11 @@ class PrivateMessageEvent:
     full_message: str
     segments: list
     timestamp: int
+    images: list = None
+
+    def __post_init__(self):
+        if self.images is None:
+            self.images = []
 
 
 class EventHandler:
@@ -53,6 +63,7 @@ class EventHandler:
 
         text_parts: list[str] = []
         full_parts: list[str] = []
+        image_urls: list[str] = []
         is_at_bot = False
 
         for seg in segments:
@@ -67,6 +78,9 @@ class EventHandler:
                     is_at_bot = True
                 full_parts.append(f"@{qq}")
             elif seg_type == "image":
+                url = seg.get("data", {}).get("url", "")
+                if url:
+                    image_urls.append(url)
                 full_parts.append("[图片]")
             elif seg_type == "face":
                 full_parts.append("[表情]")
@@ -92,6 +106,7 @@ class EventHandler:
             is_at_bot=is_at_bot,
             timestamp=data.get("time", 0),
             sender_role=role,
+            images=image_urls,
         )
 
         logger.debug(
@@ -111,6 +126,7 @@ class EventHandler:
 
         text_parts: list[str] = []
         full_parts: list[str] = []
+        image_urls: list[str] = []
 
         for seg in segments:
             seg_type = seg.get("type", "")
@@ -119,6 +135,9 @@ class EventHandler:
                 text_parts.append(t)
                 full_parts.append(t)
             elif seg_type == "image":
+                url = seg.get("data", {}).get("url", "")
+                if url:
+                    image_urls.append(url)
                 full_parts.append("[图片]")
             elif seg_type == "face":
                 full_parts.append("[表情]")
@@ -136,6 +155,7 @@ class EventHandler:
             full_message="".join(full_parts).strip(),
             segments=segments,
             timestamp=data.get("time", 0),
+            images=image_urls,
         )
 
         logger.debug("Parsed private: [%s] %s", event.nickname, event.raw_text[:50])

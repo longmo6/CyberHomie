@@ -65,6 +65,7 @@ class BufferedMessage:
     text: str
     is_at_bot: bool
     group_id: int = 0
+    images: List[str] = field(default_factory=list)  # image URLs
     timestamp: float = field(default_factory=time.time)
 
 
@@ -155,6 +156,7 @@ class Humanizer:
             text=event.raw_text,
             is_at_bot=event.is_at_bot,
             group_id=gid,
+            images=event.images or [],
         )
 
         # @-mention：立即处理，触发 3 分钟高活跃
