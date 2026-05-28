@@ -64,23 +64,33 @@ async def on_session_end(group_id: int):
 
 
 # --- Proactive topic generation ---
+_last_topic_time: Dict[int, float] = {}  # 上次开话题时间（防重复）
+
+
 async def topic_loop():
-    """During active sessions, start a topic if chat has been quiet for 10+ min."""
+    """活跃期内，安静一段时间后主动开话题。"""
     while True:
         try:
-            await asyncio.sleep(120)
+            await asyncio.sleep(60)  # 每分钟检查一次
             for gid in list(settings.group_ids):
                 humanizer._check_random_session(gid)
                 state = humanizer._get_state(gid)
+
+                # 必须在活跃期中
                 if state.session_active_until is None or time.time() >= state.session_active_until:
                     continue
-                last_time = _last_group_msg_time.get(gid, 0)
-                if last_time == 0:
-                    continue
-                silence = time.time() - last_time
-                if silence < 600:
+
+                # 距离上次开话题至少 5 分钟
+                last_topic = _last_topic_time.get(gid, 0)
+                if time.time() - last_topic < 300:
                     continue
 
+                # 上条消息是自己发的就不开（避免自言自语）
+                last_msgs = await group_memory.get_recent_messages(gid, limit=1)
+                if last_msgs and last_msgs[0].get("role") == "assistant":
+                    continue
+
+                # 开话题
                 group_file = build_group_context(gid)
                 history = await build_chat_history(gid, limit=10)
                 group_ctx_list = await group_memory.get_important_memories(gid)
@@ -98,6 +108,7 @@ async def topic_loop():
                 await typing_delay(topic)
                 await api_client.send_group_message(gid, topic)
                 humanizer.notify_bot_replied(gid)
+                _last_topic_time[gid] = time.time()
                 logger.info("[Bot][群%d][主动] -> %s", gid, topic[:60])
                 await group_memory.save_message(
                     gid, settings.bot_qq_id, personality.name, topic, is_bot=True
