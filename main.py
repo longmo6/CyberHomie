@@ -119,6 +119,42 @@ async def typing_delay(text: str):
     await asyncio.sleep(delay)
 
 
+def split_message(text: str) -> list[str]:
+    """拆分长消息：按换行拆分，空行合并，每段不超过150字"""
+    parts = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if len(line) > 150:
+            for i in range(0, len(line), 150):
+                parts.append(line[i:i+150])
+        else:
+            parts.append(line)
+    return parts if parts else [text]
+
+
+async def send_group_split(group_id: int, text: str, reply_to: int = 0):
+    """分条发送群消息，第一条可引用回复"""
+    parts = split_message(text)
+    for i, part in enumerate(parts):
+        if i > 0:
+            await asyncio.sleep(random.uniform(0.8, 2.0))
+        rt = reply_to if i == 0 else 0
+        await api_client.send_group_message(group_id, part, reply_to=rt)
+        logger.info("[Bot][群%d] -> %s", group_id, part[:60])
+
+
+async def send_private_split(user_id: int, text: str):
+    """分条发送私聊消息"""
+    parts = split_message(text)
+    for i, part in enumerate(parts):
+        if i > 0:
+            await asyncio.sleep(random.uniform(0.8, 2.0))
+        await api_client.send_private_message(user_id, part)
+        logger.info("[Bot][私聊] -> %s", part[:60])
+
+
 # --- Build context for LLM ---
 async def build_user_context(user_id: int) -> str:
     user_ctx = await user_memory.get_user_summary(user_id)
@@ -203,9 +239,8 @@ async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: f
         reply_to = msg_id if quote else 0
 
         await typing_delay(text)
-        await api_client.send_group_message(group_id, text, reply_to=reply_to)
+        await send_group_split(group_id, text, reply_to=reply_to)
         humanizer.notify_bot_replied(group_id)
-        logger.info("[Bot][群%d] -> %s (quote=%s)", group_id, text[:60], quote)
 
         await group_memory.save_message(
             group_id, settings.bot_qq_id, personality.name, text, is_bot=True
@@ -319,9 +354,8 @@ async def handle_group_message(event: GroupMessageEvent):
         reply_to = msg_id if quote else 0
 
         await typing_delay(text)
-        await api_client.send_group_message(event.group_id, text, reply_to=reply_to)
+        await send_group_split(event.group_id, text, reply_to=reply_to)
         humanizer.notify_bot_replied(event.group_id)
-        logger.info("[Bot][群%d] -> %s (quote=%s)", event.group_id, text[:60], quote)
 
         await group_memory.save_message(
             event.group_id, settings.bot_qq_id, personality.name, text, is_bot=True
@@ -357,8 +391,7 @@ async def handle_private_message(event: PrivateMessageEvent):
         return
 
     reply = humanizer.post_process_reply(reply)
-    await api_client.send_private_message(event.user_id, reply)
-    logger.info("[Bot][私聊] -> %s", reply[:80])
+    await send_private_split(event.user_id, reply)
 
     await group_memory.save_message(
         0, settings.bot_qq_id, personality.name, reply, is_bot=True
