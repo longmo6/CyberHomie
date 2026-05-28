@@ -113,9 +113,9 @@ async def topic_loop():
 
 # --- Typing delay ---
 async def typing_delay(text: str):
-    """模拟打字延迟：每字0.3秒，范围2-8秒，加随机波动"""
+    """模拟打字延迟：每字0.3秒，范围3-10秒，随机0-1秒"""
     base = len(text) * 0.3
-    delay = min(8.0, max(2.0, base)) + random.uniform(0.5, 2.0)
+    delay = min(10.0, max(3.0, base)) + random.uniform(0, 1.0)
     await asyncio.sleep(delay)
 
 
@@ -139,7 +139,7 @@ async def send_group_split(group_id: int, text: str, reply_to: int = 0):
     parts = split_message(text)
     for i, part in enumerate(parts):
         if i > 0:
-            await asyncio.sleep(random.uniform(0.8, 2.0))
+            await typing_delay(part)
         rt = reply_to if i == 0 else 0
         await api_client.send_group_message(group_id, part, reply_to=rt)
         logger.info("[Bot][群%d] -> %s", group_id, part[:60])
@@ -150,7 +150,7 @@ async def send_private_split(user_id: int, text: str):
     parts = split_message(text)
     for i, part in enumerate(parts):
         if i > 0:
-            await asyncio.sleep(random.uniform(0.8, 2.0))
+            await typing_delay(part)
         await api_client.send_private_message(user_id, part)
         logger.info("[Bot][私聊] -> %s", part[:60])
 
@@ -404,6 +404,7 @@ async def handle_private_message(event: PrivateMessageEvent):
         return
 
     reply = humanizer.post_process_reply(reply)
+    await typing_delay(reply)
     await send_private_split(event.user_id, reply)
 
     await group_memory.save_message(
