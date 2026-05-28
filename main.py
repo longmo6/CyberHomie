@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 import sys
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 from typing import Optional, List
@@ -42,6 +43,7 @@ scheduler = BackgroundScheduler(db, user_memory, group_memory, llm_client, setti
 
 napcat_process: Optional[subprocess.Popen] = None
 loop: Optional[asyncio.AbstractEventLoop] = None
+_last_group_msg_time: float = 0.0
 
 
 # --- Session end callback ---
@@ -59,6 +61,48 @@ async def on_session_end():
     print(f"[Memory] Summarizing group {settings.target_group_id}...")
     await group_file_memory.summarize_and_save(settings.target_group_id)
     print("[Memory] Done.\n")
+
+
+# --- Proactive topic generation ---
+async def topic_loop():
+    """During active sessions, start a topic if chat has been quiet for 10+ min."""
+    while True:
+        try:
+            await asyncio.sleep(120)  # check every 2 minutes
+            if not humanizer._check_random_session():
+                continue  # not in active session
+            if _last_group_msg_time == 0:
+                continue
+            silence = time.time() - _last_group_msg_time
+            if silence < 600:  # less than 10 min
+                continue
+
+            # Generate a topic
+            group_file = build_group_context(settings.target_group_id)
+            history = await build_chat_history(settings.target_group_id, limit=10)
+            group_ctx_list = await group_memory.get_important_memories(settings.target_group_id)
+            if group_file:
+                group_ctx_list.append(group_file)
+
+            topic = await llm_client.generate_topic(
+                personality.get_system_prompt("", "\n".join(group_ctx_list)),
+                history,
+            )
+            if not topic or personality.check_forbidden(topic):
+                continue
+
+            topic = humanizer.post_process_reply(topic)
+            await typing_delay(topic)
+            await api_client.send_group_message(settings.target_group_id, topic)
+            humanizer.notify_bot_replied()
+            logger.info("[Bot][主动] -> %s", topic[:60])
+            await group_memory.save_message(
+                settings.target_group_id, settings.bot_qq_id, personality.name, topic, is_bot=True
+            )
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Topic loop error: %s", e)
 
 
 # --- Typing delay ---
@@ -200,9 +244,12 @@ async def lifespan(app: FastAPI):
     import threading
     terminal_thread = threading.Thread(target=terminal_loop, daemon=True)
     terminal_thread.start()
+    topic_task = asyncio.create_task(topic_loop())
     print("\nType 'help' for commands.\n")
 
     yield
+
+    topic_task.cancel()
 
     if napcat_process and napcat_process.poll() is None:
         napcat_process.terminate()
@@ -219,6 +266,8 @@ app = FastAPI(title="CyberHomie", lifespan=lifespan)
 
 # --- Group message handler ---
 async def handle_group_message(event: GroupMessageEvent):
+    global _last_group_msg_time
+    _last_group_msg_time = time.time()
     logger.info("[群聊][%s] %s (at=%s)", event.nickname, event.raw_text[:60], event.is_at_bot)
     recent_messages.append(event)
 

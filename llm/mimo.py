@@ -154,5 +154,44 @@ class LLMClient:
             logger.error("decide_replies failed: %s", e)
             return []
 
+    async def generate_topic(
+        self, system_prompt: str, recent_history: list[dict]
+    ) -> str:
+        """Generate a proactive conversation topic when chat has been quiet."""
+        history_text = ""
+        for msg in recent_history[-5:]:
+            history_text += f"{msg.get('content', '')}\n"
+
+        prompt = (
+            "群聊已经安静了一会儿。你想找个话题聊聊天。\n"
+            "根据之前的聊天内容和你对群的了解，随便说点什么开启话题。\n"
+            "要求：\n"
+            "- 像普通人突然想到什么一样自然地说出来\n"
+            '- 不要太正式，不要"大家好"这种\n'
+            "- 可以分享个有趣的事、问个问题、吐槽点什么\n"
+            "- 一句话就行，不要长篇大论\n\n"
+        )
+        if history_text:
+            prompt += f"之前的聊天：\n{history_text}\n\n"
+        prompt += "你现在想说什么？直接说，不要任何前缀。"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+        try:
+            resp = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=100,
+                temperature=0.9,
+            )
+            content = resp.choices[0].message.content
+            return content.strip() if content else ""
+        except Exception as e:
+            logger.error("generate_topic failed: %s", e)
+            return ""
+
     async def close(self):
         await self.client.close()
