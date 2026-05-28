@@ -23,6 +23,7 @@ MEMORY_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "memory")
 MAX_MEMORY_CHARS = 1500       # 记忆文件最大字符数
 MAX_INJECT_CHARS = 800        # 注入 prompt 的最大字符数
 COMPRESS_THRESHOLD = 1500     # 超过此长度触发压缩
+SUMMARY_MSG_THRESHOLD = 30    # 积累多少新消息后才总结
 
 
 class UserFileMemory:

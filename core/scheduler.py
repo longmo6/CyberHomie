@@ -69,6 +69,7 @@ class BackgroundScheduler:
             rows = await self.db.fetchall(
                 "SELECT qq_id, nickname FROM users "
                 "WHERE message_count >= 3 "
+                "AND last_seen > datetime('now', '-1 day') "
                 "ORDER BY last_seen DESC LIMIT 20"
             )
             for row in rows:

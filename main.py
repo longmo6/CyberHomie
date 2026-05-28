@@ -52,13 +52,14 @@ _last_group_msg_time: Dict[int, float] = {}
 
 # --- Session end callback ---
 async def on_session_end(group_id: int):
-    print(f"\n[Memory] Session ended (group {group_id}), summarizing...")
-    rows = await db.fetchall(
-        "SELECT qq_id, nickname FROM users WHERE message_count >= 1 "
-        "ORDER BY last_seen DESC LIMIT 20"
-    )
-    for qq_id, nickname in rows:
-        await user_file_memory.summarize_and_save(qq_id, nickname)
+    replied_user_ids = humanizer.get_replied_users(group_id)
+    if not replied_user_ids:
+        return
+    print(f"\n[Memory] Session ended (group {group_id}), summarizing {len(replied_user_ids)} users...")
+    for uid in replied_user_ids:
+        row = await db.fetchone("SELECT nickname FROM users WHERE qq_id = ?", (uid,))
+        if row:
+            await user_file_memory.summarize_and_save(uid, row[0])
     await group_file_memory.summarize_and_save(group_id)
     print("[Memory] Done.\n")
 
@@ -204,13 +205,6 @@ async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: f
         await user_memory.get_or_create_user(msg.user_id, msg.nickname)
         await user_memory.increment_message_count(msg.user_id)
 
-    # 每 30 条消息总结一次
-    for msg in messages:
-        row = await db.fetchone("SELECT message_count, nickname FROM users WHERE qq_id = ?", (msg.user_id,))
-        if row and row[0] % 30 == 0 and row[0] > 0:
-            print(f"[Memory] {row[1]} hit {row[0]} messages, summarizing...")
-            await user_file_memory.summarize_and_save(msg.user_id, row[1])
-
     user_ctx = await build_user_context(messages[0].user_id)
     group_ctx_list = await group_memory.get_important_memories(group_id)
     group_file = build_group_context(group_id)
@@ -268,6 +262,7 @@ async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: f
         for msg in messages:
             if msg.message_id == msg_id:
                 await relationship.update_closeness(msg.user_id, 0.01)
+                humanizer.record_replied_user(group_id, msg.user_id)
                 break
 
 
@@ -374,12 +369,13 @@ async def handle_group_message(event: GroupMessageEvent):
 
         await typing_delay(text)
         await send_group_split(event.group_id, text, reply_to=reply_to)
-        humanizer.notify_bot_replied(event.group_id)
+        humanizer.notify_bot_replied(event.group_id, from_at=True)
 
         await group_memory.save_message(
             event.group_id, settings.bot_qq_id, personality.name, text, is_bot=True
         )
         await relationship.update_closeness(event.user_id, 0.01)
+        humanizer.record_replied_user(event.group_id, event.user_id)
 
 
 # --- Private message handler (unchanged, immediate reply) ---
@@ -389,12 +385,6 @@ async def handle_private_message(event: PrivateMessageEvent):
     await user_memory.get_or_create_user(event.user_id, event.nickname)
     await user_memory.increment_message_count(event.user_id)
     await group_memory.save_message(0, event.user_id, event.nickname, event.raw_text)
-
-    # 每 30 条消息总结一次用户记忆
-    row = await db.fetchone("SELECT message_count FROM users WHERE qq_id = ?", (event.user_id,))
-    if row and row[0] % 30 == 0 and row[0] > 0:
-        print(f"[Memory] {event.nickname} hit {row[0]} messages, summarizing...")
-        await user_file_memory.summarize_and_save(event.user_id, event.nickname)
 
     user_ctx = await build_user_context(event.user_id)
     raw_msgs = await group_memory.get_recent_messages(0, limit=20)

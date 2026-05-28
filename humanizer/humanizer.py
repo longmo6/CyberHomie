@@ -82,6 +82,7 @@ class GroupState:
     eval_task: Optional[asyncio.Task] = None  # 定时评估任务
     fatigue: float = 0.0              # 疲惫值 0-100，越高越敷衍
     reply_count: int = 0              # 本轮活跃期已回复次数
+    active_users: set = field(default_factory=set)  # 本轮活跃过的用户ID
 
 
 class Humanizer:
@@ -136,19 +137,38 @@ class Humanizer:
         decay = elapsed / ENGAGE_DECAY_DURATION * 100
         return max(0.0, state.engagement - decay)
 
-    def notify_bot_replied(self, group_id: int):
-        """bot 回复后提升参与度，同时增加疲惫值"""
+    def notify_bot_replied(self, group_id: int, from_at: bool = False):
+        """bot 回复后提升参与度。随机出没期间累积疲惫值。"""
         state = self._get_state(group_id)
         current = self.get_current_engagement(group_id)
         state.engagement = min(100, current + 20)
         state.engage_set_time = time.time()
-        state.reply_count += 1
-        # 每次回复增加疲惫，回复越多越疲惫
-        state.fatigue = min(100, state.fatigue + 8 + state.reply_count * 2)
+        # 只在随机出没期间累积疲惫，@-mention 不算
+        if not from_at and state.session_active_until:
+            state.reply_count += 1
+            state.fatigue = min(100, state.fatigue + 5 + state.reply_count)
+
+    def record_replied_user(self, group_id: int, user_id: int):
+        """记录本轮被bot回复过的用户（只有真正互动过的人）"""
+        state = self._get_state(group_id)
+        state.active_users.add(user_id)
+
+    def get_replied_users(self, group_id: int) -> set:
+        """获取本轮被回复过的用户"""
+        state = self._get_state(group_id)
+        return state.active_users.copy()
 
     def get_fatigue(self, group_id: int) -> float:
-        """获取当前疲惫值"""
+        """获取当前疲惫值（含时间衰减：每30秒减1）"""
         state = self._get_state(group_id)
+        if state.fatigue <= 0:
+            return 0.0
+        # 按时间衰减
+        if state.engage_set_time > 0:
+            elapsed = time.time() - state.engage_set_time
+            decay = elapsed / 10  # 每10秒减1
+            state.fatigue = max(0.0, state.fatigue - decay)
+            state.engage_set_time = time.time()
         return state.fatigue
 
     # ============================================================
@@ -301,6 +321,7 @@ class Humanizer:
             state.engage_set_time = now
             state.fatigue = 0
             state.reply_count = 0
+            state.active_users.clear()
             logger.info("[Group %d] Session started, %d min (engagement=%d)",
                         group_id, duration, engage)
             return True
