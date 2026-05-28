@@ -91,6 +91,9 @@ class Humanizer:
 
         # 每群独立状态（group_id -> GroupState）
         self._groups: Dict[int, GroupState] = {}
+        # 预创建所有群的状态
+        for gid in settings.group_ids:
+            self._get_state(gid)
 
         # 回调函数
         self._on_session_end: Optional[Callable[[int], Awaitable[None]]] = None
