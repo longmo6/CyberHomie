@@ -414,18 +414,28 @@ async def handle_command(cmd: str):
 
     if action == "help":
         print("""
-  users                 List all users
-  status                Show bot status
-  user <qq_id>          Show user detail
-  memory <qq_id>        Show user memory file
-  group                 Show group memory file
-  edit <qq_id> <f> <v>  Edit user field
-  history <qq_id>       Show recent chat
-  sessions              Show group memories
-  summarize             Summarize all users + group now
-  summarize <qq_id>     Summarize specific user
-  summarize group       Summarize group memory
-  help                  Show this help
+  users                 列出所有用户
+  status                查看当前状态（参与度、缓冲区、活跃期）
+  user <qq_id>          查看用户详情
+  memory <qq_id>        查看用户记忆文件
+  group                 查看群记忆文件
+  edit <qq_id> <f> <v>  编辑用户字段（nickname/personality_notes/interests/emotional_tendency/quirks）
+  history <qq_id>       查看聊天记录
+  sessions              查看群记忆数据库
+  summarize             立即总结所有用户+群记忆
+  summarize <qq_id>     总结指定用户
+  summarize group       总结群记忆
+  say <消息>            以bot身份发送群消息
+  engage <0-100>        手动设置参与度
+  session start [分钟]  手动开启活跃期（默认5分钟）
+  session stop          手动结束活跃期
+  buffer                查看当前消息缓冲区
+  rel <qq_id>           查看与某人的关系
+  rel <qq_a> <qq_b>     查看两人关系
+  reload                热重载人格配置（不重启）
+  test <消息>           测试LLM回复（不发送到群）
+  debug                 切换详细日志模式
+  help                  显示帮助
 """)
 
     elif action == "users":
@@ -541,6 +551,104 @@ async def handle_command(cmd: str):
             print(f"[Memory] Summarizing group...")
             await group_file_memory.summarize_and_save(settings.target_group_id)
             print(f"[Memory] Done. {len(rows)} users + group summarized.")
+
+    elif action == "say":
+        if len(parts) >= 2:
+            msg = " ".join(parts[1:])
+            await api_client.send_group_message(settings.target_group_id, msg)
+            await group_memory.save_message(
+                settings.target_group_id, settings.bot_qq_id, personality.name, msg, is_bot=True
+            )
+            print(f"[Bot] Sent: {msg}")
+        else:
+            print("Usage: say <消息>")
+
+    elif action == "engage":
+        if len(parts) >= 2:
+            level = float(parts[1])
+            humanizer.trigger_active(3, engagement=level)
+            print(f"Engagement set to {level}")
+        else:
+            print(f"Current engagement: {humanizer.get_current_engagement():.0f}")
+
+    elif action == "session":
+        if len(parts) >= 2 and parts[1] == "start":
+            minutes = int(parts[2]) if len(parts) >= 3 else 5
+            humanizer.trigger_active(minutes, engagement=60)
+            print(f"Active session started for {minutes} min")
+        elif len(parts) >= 2 and parts[1] == "stop":
+            humanizer._session_active_until = None
+            humanizer._engagement = 0
+            humanizer._buffer.clear()
+            print("Active session stopped")
+        else:
+            print("Usage: session start [分钟] | session stop")
+
+    elif action == "buffer":
+        buf = humanizer._buffer
+        if buf:
+            print(f"\nBuffer ({len(buf)} messages):")
+            for m in buf:
+                at = " [@bot]" if m.is_at_bot else ""
+                print(f"  [{m.nickname}]{at}: {m.text[:60]}")
+        else:
+            print("Buffer is empty")
+        print()
+
+    elif action == "rel":
+        if len(parts) >= 3:
+            a, b = int(parts[1]), int(parts[2])
+            rel = await relationship.get_user_relationship(a, b)
+            row_a = await db.fetchone("SELECT nickname FROM users WHERE qq_id = ?", (a,))
+            row_b = await db.fetchone("SELECT nickname FROM users WHERE qq_id = ?", (b,))
+            na = row_a[0] if row_a else str(a)
+            nb = row_b[0] if row_b else str(b)
+            if rel:
+                print(f"\n{na} <-> {nb}: {rel['type']}")
+                if rel['notes']:
+                    print(f"  Notes: {rel['notes']}")
+            else:
+                print(f"\n{na} <-> {nb}: no relationship recorded")
+            print()
+        elif len(parts) >= 2:
+            qq_id = int(parts[1])
+            bot_rel = await relationship.get_bot_relationship(qq_id)
+            row = await db.fetchone("SELECT nickname FROM users WHERE qq_id = ?", (qq_id,))
+            name = row[0] if row else str(qq_id)
+            print(f"\nBot <-> {name}: {bot_rel}")
+            print()
+        else:
+            print("Usage: rel <qq_id> | rel <qq_a> <qq_b>")
+
+    elif action == "reload":
+        personality.__init__()
+        print(f"Personality reloaded: {personality.name}")
+
+    elif action == "test":
+        if len(parts) >= 2:
+            msg = " ".join(parts[1:])
+            user_ctx = ""
+            group_ctx_list = await group_memory.get_important_memories(settings.target_group_id)
+            group_file = build_group_context(settings.target_group_id)
+            if group_file:
+                group_ctx_list.append(group_file)
+            history = await build_chat_history(settings.target_group_id)
+            sys_prompt = personality.get_system_prompt(user_ctx, "\n".join(group_ctx_list))
+            reply = await llm_client.generate_reply(sys_prompt, history, msg)
+            if reply:
+                print(f"\nLLM reply: {reply}\n")
+            else:
+                print("LLM returned empty")
+        else:
+            print("Usage: test <消息>")
+
+    elif action == "debug":
+        import logging
+        lvl = logging.DEBUG if logger.level > logging.DEBUG else logging.INFO
+        logger.setLevel(lvl)
+        logging.getLogger("humanizer").setLevel(lvl)
+        logging.getLogger("event_handler").setLevel(lvl)
+        print(f"Log level: {'DEBUG' if lvl == logging.DEBUG else 'INFO'}")
 
     else:
         print(f"Unknown: {action}. Type 'help'.")
