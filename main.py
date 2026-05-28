@@ -155,7 +155,7 @@ async def send_private_split(user_id: int, text: str):
 # --- Build context for LLM ---
 async def build_user_context(user_id: int) -> str:
     user_ctx = await user_memory.get_user_summary(user_id)
-    file_memory = user_file_memory.load(user_id)
+    file_memory = user_file_memory.load_for_prompt(user_id)
     if file_memory:
         user_ctx += f"\n长期记忆:\n{file_memory}"
     bot_rel = await relationship.get_bot_relationship(user_id)
@@ -176,8 +176,8 @@ async def build_chat_history(group_id: int, limit: int = 15) -> list[dict]:
 
 
 def build_group_context(group_id: int) -> str:
-    """Load group memory file."""
-    return group_file_memory.load(group_id)
+    """Load group memory file (sorted by importance, truncated)."""
+    return group_file_memory.load_for_prompt(group_id)
 
 
 # --- Flush callback: batch decision for buffered messages ---
