@@ -196,6 +196,13 @@ async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: f
         await user_memory.get_or_create_user(msg.user_id, msg.nickname)
         await user_memory.increment_message_count(msg.user_id)
 
+    # 每 30 条消息总结一次
+    for msg in messages:
+        row = await db.fetchone("SELECT message_count, nickname FROM users WHERE qq_id = ?", (msg.user_id,))
+        if row and row[0] % 30 == 0 and row[0] > 0:
+            print(f"[Memory] {row[1]} hit {row[0]} messages, summarizing...")
+            await user_file_memory.summarize_and_save(msg.user_id, row[1])
+
     user_ctx = await build_user_context(messages[0].user_id)
     group_ctx_list = await group_memory.get_important_memories(group_id)
     group_file = build_group_context(group_id)
@@ -370,6 +377,12 @@ async def handle_private_message(event: PrivateMessageEvent):
     await user_memory.get_or_create_user(event.user_id, event.nickname)
     await user_memory.increment_message_count(event.user_id)
     await group_memory.save_message(0, event.user_id, event.nickname, event.raw_text)
+
+    # 每 30 条消息总结一次用户记忆
+    row = await db.fetchone("SELECT message_count FROM users WHERE qq_id = ?", (event.user_id,))
+    if row and row[0] % 30 == 0 and row[0] > 0:
+        print(f"[Memory] {event.nickname} hit {row[0]} messages, summarizing...")
+        await user_file_memory.summarize_and_save(event.user_id, event.nickname)
 
     user_ctx = await build_user_context(event.user_id)
     raw_msgs = await group_memory.get_recent_messages(0, limit=20)
