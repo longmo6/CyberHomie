@@ -291,21 +291,16 @@ class Humanizer:
 
         # 到了出没时间
         if state.next_session_time > 0 and now >= state.next_session_time:
-            if self._is_active_hour():
-                _, _, dur_min, dur_max, engage = self._get_session_params()
-                duration = random.randint(dur_min, dur_max)
-                state.session_active_until = now + duration * 60
-                state.engagement = engage
-                state.engage_set_time = now
-                state.fatigue = 0
-                state.reply_count = 0
-                logger.info("[Group %d] Session started, %d min (engagement=%d)",
-                            group_id, duration, engage)
-                return True
-            else:
-                # 非活跃时段，跳过这次
-                self._schedule_next_session(state)
-                return False
+            _, _, dur_min, dur_max, engage = self._get_session_params()
+            duration = random.randint(dur_min, dur_max)
+            state.session_active_until = now + duration * 60
+            state.engagement = engage
+            state.engage_set_time = now
+            state.fatigue = 0
+            state.reply_count = 0
+            logger.info("[Group %d] Session started, %d min (engagement=%d)",
+                        group_id, duration, engage)
+            return True
 
         return False
 
@@ -335,7 +330,10 @@ class Humanizer:
                 return f"Random session (buffer={buf_len}){night}"
             if state.next_session_time:
                 gap = int(state.next_session_time - time.time())
-                return f"IDLE (next in {gap // 60}min, buffer={buf_len}){night}"
+                if gap > 0:
+                    return f"IDLE (next in {gap // 60}min, buffer={buf_len}){night}"
+                else:
+                    return f"IDLE (ready to start, buffer={buf_len}){night}"
             return f"IDLE (buffer={buf_len}){night}"
         lines = []
         for gid in self._groups:
