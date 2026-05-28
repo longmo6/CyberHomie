@@ -4,7 +4,7 @@ import sys
 import time
 from collections import deque
 from contextlib import asynccontextmanager
-from typing import Optional, List
+from typing import Dict, Optional, List
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -43,12 +43,15 @@ scheduler = BackgroundScheduler(db, user_memory, group_memory, llm_client, setti
 
 napcat_process: Optional[subprocess.Popen] = None
 loop: Optional[asyncio.AbstractEventLoop] = None
-_last_group_msg_time: float = 0.0
+
+
+# --- Per-group message timestamps ---
+_last_group_msg_time: Dict[int, float] = {}
 
 
 # --- Session end callback ---
-async def on_session_end():
-    print("\n[Memory] Active session ended, summarizing...")
+async def on_session_end(group_id: int):
+    print(f"\n[Memory] Session ended (group {group_id}), summarizing...")
     rows = await db.fetchall(
         "SELECT qq_id, nickname FROM users WHERE message_count >= 1 "
         "ORDER BY last_seen DESC LIMIT 20"
@@ -57,9 +60,8 @@ async def on_session_end():
         print(f"[Memory] Summarizing user: {nickname} ({qq_id})...")
         await user_file_memory.summarize_and_save(qq_id, nickname)
         print(f"[Memory] Saved: data/memory/{qq_id}.md")
-    # Summarize group memory
-    print(f"[Memory] Summarizing group {settings.target_group_id}...")
-    await group_file_memory.summarize_and_save(settings.target_group_id)
+    print(f"[Memory] Summarizing group {group_id}...")
+    await group_file_memory.summarize_and_save(group_id)
     print("[Memory] Done.\n")
 
 
@@ -68,37 +70,40 @@ async def topic_loop():
     """During active sessions, start a topic if chat has been quiet for 10+ min."""
     while True:
         try:
-            await asyncio.sleep(120)  # check every 2 minutes
-            if not humanizer._check_random_session():
-                continue  # not in active session
-            if _last_group_msg_time == 0:
-                continue
-            silence = time.time() - _last_group_msg_time
-            if silence < 600:  # less than 10 min
-                continue
+            await asyncio.sleep(120)
+            for gid in list(settings.group_ids):
+                humanizer._check_random_session(gid)
+                state = humanizer._get_state(gid)
+                if state.session_active_until is None or time.time() >= state.session_active_until:
+                    continue
+                last_time = _last_group_msg_time.get(gid, 0)
+                if last_time == 0:
+                    continue
+                silence = time.time() - last_time
+                if silence < 600:
+                    continue
 
-            # Generate a topic
-            group_file = build_group_context(settings.target_group_id)
-            history = await build_chat_history(settings.target_group_id, limit=10)
-            group_ctx_list = await group_memory.get_important_memories(settings.target_group_id)
-            if group_file:
-                group_ctx_list.append(group_file)
+                group_file = build_group_context(gid)
+                history = await build_chat_history(gid, limit=10)
+                group_ctx_list = await group_memory.get_important_memories(gid)
+                if group_file:
+                    group_ctx_list.append(group_file)
 
-            topic = await llm_client.generate_topic(
-                personality.get_system_prompt("", "\n".join(group_ctx_list)),
-                history,
-            )
-            if not topic or personality.check_forbidden(topic):
-                continue
+                topic = await llm_client.generate_topic(
+                    personality.get_system_prompt("", "\n".join(group_ctx_list)),
+                    history,
+                )
+                if not topic or personality.check_forbidden(topic):
+                    continue
 
-            topic = humanizer.post_process_reply(topic)
-            await typing_delay(topic)
-            await api_client.send_group_message(settings.target_group_id, topic)
-            humanizer.notify_bot_replied()
-            logger.info("[Bot][主动] -> %s", topic[:60])
-            await group_memory.save_message(
-                settings.target_group_id, settings.bot_qq_id, personality.name, topic, is_bot=True
-            )
+                topic = humanizer.post_process_reply(topic)
+                await typing_delay(topic)
+                await api_client.send_group_message(gid, topic)
+                humanizer.notify_bot_replied(gid)
+                logger.info("[Bot][群%d][主动] -> %s", gid, topic[:60])
+                await group_memory.save_message(
+                    gid, settings.bot_qq_id, personality.name, topic, is_bot=True
+                )
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -141,14 +146,11 @@ def build_group_context(group_id: int) -> str:
 
 
 # --- Flush callback: batch decision for buffered messages ---
-async def on_flush(messages: List[BufferedMessage], engagement: float):
+async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: float):
     """Called when humanizer flushes buffered messages."""
     if not messages:
         return
 
-    group_id = settings.target_group_id
-
-    # Save all messages to memory first
     for msg in messages:
         await group_memory.save_message(
             group_id, msg.user_id, msg.nickname, msg.text
@@ -156,7 +158,6 @@ async def on_flush(messages: List[BufferedMessage], engagement: float):
         await user_memory.get_or_create_user(msg.user_id, msg.nickname)
         await user_memory.increment_message_count(msg.user_id)
 
-    # Build context
     user_ctx = await build_user_context(messages[0].user_id)
     group_ctx_list = await group_memory.get_important_memories(group_id)
     group_file = build_group_context(group_id)
@@ -166,7 +167,6 @@ async def on_flush(messages: List[BufferedMessage], engagement: float):
 
     sys_prompt = personality.get_system_prompt(user_ctx, "\n".join(group_ctx_list))
 
-    # Engagement influences LLM behavior
     if engagement > 70:
         sys_prompt += "\n\n你现在很积极，正在参与讨论。大部分消息都可以回复。"
     elif engagement > 30:
@@ -174,7 +174,6 @@ async def on_flush(messages: List[BufferedMessage], engagement: float):
     else:
         sys_prompt += "\n\n你已经不太想聊了，除非有特别有意思的内容否则不回复。"
 
-    # Prepare buffered messages for LLM
     buffered_data = [
         {
             "message_id": m.message_id,
@@ -185,7 +184,6 @@ async def on_flush(messages: List[BufferedMessage], engagement: float):
         for m in messages
     ]
 
-    # Let LLM decide
     replies = await llm_client.decide_replies(sys_prompt, history, buffered_data)
 
     for reply in replies:
@@ -203,8 +201,8 @@ async def on_flush(messages: List[BufferedMessage], engagement: float):
 
         await typing_delay(text)
         await api_client.send_group_message(group_id, text, reply_to=reply_to)
-        humanizer.notify_bot_replied()
-        logger.info("[Bot][群聊] -> %s (quote=%s)", text[:60], quote)
+        humanizer.notify_bot_replied(group_id)
+        logger.info("[Bot][群%d] -> %s (quote=%s)", group_id, text[:60], quote)
 
         await group_memory.save_message(
             group_id, settings.bot_qq_id, personality.name, text, is_bot=True
@@ -266,18 +264,14 @@ app = FastAPI(title="CyberHomie", lifespan=lifespan)
 
 # --- Group message handler ---
 async def handle_group_message(event: GroupMessageEvent):
-    global _last_group_msg_time
-    _last_group_msg_time = time.time()
-    logger.info("[群聊][%s] %s (at=%s)", event.nickname, event.raw_text[:60], event.is_at_bot)
+    _last_group_msg_time[event.group_id] = time.time()
+    logger.info("[群%d][%s] %s (at=%s)", event.group_id, event.nickname, event.raw_text[:60], event.is_at_bot)
     recent_messages.append(event)
 
-    # Buffer the message; returns immediately if @-mentioned
     pending = await humanizer.buffer_message(event)
     if pending is None:
-        return  # buffered, will be processed later
+        return
 
-    # Immediate reply (from @-mention)
-    # Save to memory
     for msg in pending:
         await group_memory.save_message(
             event.group_id, msg.user_id, msg.nickname, msg.text
@@ -322,8 +316,8 @@ async def handle_group_message(event: GroupMessageEvent):
 
         await typing_delay(text)
         await api_client.send_group_message(event.group_id, text, reply_to=reply_to)
-        humanizer.notify_bot_replied()
-        logger.info("[Bot][群聊] -> %s (quote=%s)", text[:60], quote)
+        humanizer.notify_bot_replied(event.group_id)
+        logger.info("[Bot][群%d] -> %s (quote=%s)", event.group_id, text[:60], quote)
 
         await group_memory.save_message(
             event.group_id, settings.bot_qq_id, personality.name, text, is_bot=True
@@ -357,7 +351,6 @@ async def handle_private_message(event: PrivateMessageEvent):
 
     reply = humanizer.post_process_reply(reply)
     await api_client.send_private_message(event.user_id, reply)
-    humanizer.notify_bot_replied()
     logger.info("[Bot][私聊] -> %s", reply[:80])
 
     await group_memory.save_message(
@@ -450,9 +443,8 @@ async def handle_command(cmd: str):
         print(f"Total: {len(rows)}\n")
 
     elif action == "status":
-        session_status = humanizer.get_session_status()
-        print(f"\nStatus: {session_status}")
-        print(f"Buffer: {len(humanizer._buffer)} messages")
+        print(f"\nGroups: {settings.group_ids}")
+        print(humanizer.get_session_status())
         print(f"DB: {settings.db_path}\n")
 
     elif action == "user" and len(parts) >= 2:
@@ -480,11 +472,12 @@ async def handle_command(cmd: str):
             print(f"No memory file for {qq_id}")
 
     elif action == "group":
-        content = group_file_memory.load(settings.target_group_id)
+        gid = int(parts[1]) if len(parts) >= 2 else list(settings.group_ids)[0] if settings.group_ids else 0
+        content = group_file_memory.load(gid)
         if content:
-            print(f"\n=== Group memory ({settings.target_group_id}) ===\n{content}\n")
+            print(f"\n=== Group memory ({gid}) ===\n{content}\n")
         else:
-            print(f"No group memory file")
+            print(f"No group memory file for {gid}")
 
     elif action == "edit" and len(parts) >= 4:
         qq_id = int(parts[1])
@@ -512,7 +505,7 @@ async def handle_command(cmd: str):
         print()
 
     elif action == "sessions":
-        gid = int(parts[1]) if len(parts) >= 2 else settings.target_group_id
+        gid = int(parts[1]) if len(parts) >= 2 else list(settings.group_ids)[0] if settings.group_ids else 0
         rows = await db.fetchall(
             "SELECT memory_type, content, importance, created_at FROM group_memory "
             "WHERE group_id = ? ORDER BY importance DESC",
@@ -527,8 +520,9 @@ async def handle_command(cmd: str):
 
     elif action == "summarize":
         if len(parts) >= 2 and parts[1] == "group":
-            print(f"[Memory] Summarizing group {settings.target_group_id}...")
-            await group_file_memory.summarize_and_save(settings.target_group_id)
+            for gid in settings.group_ids:
+                print(f"[Memory] Summarizing group {gid}...")
+                await group_file_memory.summarize_and_save(gid)
             print("[Memory] Done.")
         elif len(parts) >= 2:
             qq_id = int(parts[1])
@@ -548,51 +542,85 @@ async def handle_command(cmd: str):
             for qq_id, nickname in rows:
                 print(f"[Memory] {nickname} ({qq_id})...")
                 await user_file_memory.summarize_and_save(qq_id, nickname)
-            print(f"[Memory] Summarizing group...")
-            await group_file_memory.summarize_and_save(settings.target_group_id)
-            print(f"[Memory] Done. {len(rows)} users + group summarized.")
+            for gid in settings.group_ids:
+                print(f"[Memory] Summarizing group {gid}...")
+                await group_file_memory.summarize_and_save(gid)
+            print(f"[Memory] Done. {len(rows)} users + {len(settings.group_ids)} groups.")
 
     elif action == "say":
         if len(parts) >= 2:
-            msg = " ".join(parts[1:])
-            await api_client.send_group_message(settings.target_group_id, msg)
+            # say [group_id] <message>
+            gid = settings.target_group_ids.split(",")[0].strip()
+            msg_start = 1
+            if len(parts) >= 3 and parts[1].isdigit():
+                gid = parts[1]
+                msg_start = 2
+            msg = " ".join(parts[msg_start:])
+            await api_client.send_group_message(int(gid), msg)
             await group_memory.save_message(
-                settings.target_group_id, settings.bot_qq_id, personality.name, msg, is_bot=True
+                int(gid), settings.bot_qq_id, personality.name, msg, is_bot=True
             )
-            print(f"[Bot] Sent: {msg}")
+            print(f"[Bot][群{gid}] Sent: {msg}")
         else:
-            print("Usage: say <消息>")
+            print("Usage: say [群号] <消息>")
 
     elif action == "engage":
-        if len(parts) >= 2:
-            level = float(parts[1])
-            humanizer.trigger_active(3, engagement=level)
-            print(f"Engagement set to {level}")
+        if len(parts) >= 3:
+            gid, level = int(parts[1]), float(parts[2])
+            humanizer.trigger_active(gid, 3, engagement=level)
+            print(f"Group {gid} engagement set to {level}")
+        elif len(parts) >= 2:
+            gid = int(parts[1])
+            print(f"Group {gid} engagement: {humanizer.get_current_engagement(gid):.0f}")
         else:
-            print(f"Current engagement: {humanizer.get_current_engagement():.0f}")
+            for gid in settings.group_ids:
+                print(f"  Group {gid}: {humanizer.get_current_engagement(gid):.0f}")
 
     elif action == "session":
-        if len(parts) >= 2 and parts[1] == "start":
+        if len(parts) >= 3 and parts[1] == "start":
+            gid = int(parts[2])
+            minutes = int(parts[3]) if len(parts) >= 4 else 5
+            humanizer.trigger_active(gid, minutes, engagement=60)
+            print(f"Group {gid} active for {minutes} min")
+        elif len(parts) >= 3 and parts[1] == "stop":
+            gid = int(parts[2])
+            state = humanizer._get_state(gid)
+            state.session_active_until = None
+            state.engagement = 0
+            state.buffer.clear()
+            print(f"Group {gid} session stopped")
+        elif len(parts) >= 2 and parts[1] == "start":
+            # Default: first group
+            gid = list(settings.group_ids)[0] if settings.group_ids else 0
             minutes = int(parts[2]) if len(parts) >= 3 else 5
-            humanizer.trigger_active(minutes, engagement=60)
-            print(f"Active session started for {minutes} min")
+            humanizer.trigger_active(gid, minutes, engagement=60)
+            print(f"Group {gid} active for {minutes} min")
         elif len(parts) >= 2 and parts[1] == "stop":
-            humanizer._session_active_until = None
-            humanizer._engagement = 0
-            humanizer._buffer.clear()
-            print("Active session stopped")
+            for gid in settings.group_ids:
+                state = humanizer._get_state(gid)
+                state.session_active_until = None
+                state.engagement = 0
+                state.buffer.clear()
+            print("All sessions stopped")
         else:
-            print("Usage: session start [分钟] | session stop")
+            print("Usage: session start <群号> [分钟] | session stop <群号>")
 
     elif action == "buffer":
-        buf = humanizer._buffer
-        if buf:
-            print(f"\nBuffer ({len(buf)} messages):")
-            for m in buf:
-                at = " [@bot]" if m.is_at_bot else ""
-                print(f"  [{m.nickname}]{at}: {m.text[:60]}")
+        if len(parts) >= 2:
+            gid = int(parts[1])
+            state = humanizer._get_state(gid)
+            buf = state.buffer
+            if buf:
+                print(f"\nBuffer (group {gid}, {len(buf)} messages):")
+                for m in buf:
+                    at = " [@bot]" if m.is_at_bot else ""
+                    print(f"  [{m.nickname}]{at}: {m.text[:60]}")
+            else:
+                print(f"Group {gid} buffer is empty")
         else:
-            print("Buffer is empty")
+            for gid in settings.group_ids:
+                state = humanizer._get_state(gid)
+                print(f"  Group {gid}: {len(state.buffer)} buffered")
         print()
 
     elif action == "rel":
@@ -627,12 +655,13 @@ async def handle_command(cmd: str):
     elif action == "test":
         if len(parts) >= 2:
             msg = " ".join(parts[1:])
+            gid = list(settings.group_ids)[0] if settings.group_ids else 0
             user_ctx = ""
-            group_ctx_list = await group_memory.get_important_memories(settings.target_group_id)
-            group_file = build_group_context(settings.target_group_id)
+            group_ctx_list = await group_memory.get_important_memories(gid)
+            group_file = build_group_context(gid)
             if group_file:
                 group_ctx_list.append(group_file)
-            history = await build_chat_history(settings.target_group_id)
+            history = await build_chat_history(gid)
             sys_prompt = personality.get_system_prompt(user_ctx, "\n".join(group_ctx_list))
             reply = await llm_client.generate_reply(sys_prompt, history, msg)
             if reply:

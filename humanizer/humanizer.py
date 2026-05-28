@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Callable, Awaitable, Optional, List
+from typing import Callable, Awaitable, Optional, List, Dict
 
 from config import Settings
 from core.event_handler import GroupMessageEvent
@@ -26,10 +26,9 @@ FORMAL_PATTERNS = [
     r"希望(对)?你(有)?帮助",
 ]
 
-# Engagement thresholds
-ENGAGE_EVAL_INTERVAL = 10.0    # seconds between evaluations
-ENGAGE_EVAL_MSG_COUNT = 3      # or after this many messages
-ENGAGE_DECAY_DURATION = 180.0  # seconds for engagement to decay from 100 to 0
+ENGAGE_EVAL_INTERVAL = 10.0
+ENGAGE_EVAL_MSG_COUNT = 3
+ENGAGE_DECAY_DURATION = 180.0
 
 
 @dataclass
@@ -39,7 +38,21 @@ class BufferedMessage:
     nickname: str
     text: str
     is_at_bot: bool
+    group_id: int = 0
     timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
+class GroupState:
+    """Per-group engagement and session state."""
+    engagement: float = 0.0
+    engage_set_time: float = 0.0
+    last_eval_time: float = 0.0
+    messages_since_eval: int = 0
+    session_active_until: Optional[float] = None
+    next_session_time: float = 0.0
+    buffer: List[BufferedMessage] = field(default_factory=list)
+    eval_task: Optional[asyncio.Task] = None
 
 
 class Humanizer:
@@ -51,181 +64,168 @@ class Humanizer:
         self.session_duration_min = settings.session_duration_min
         self.session_duration_max = settings.session_duration_max
 
-        # Engagement state
-        self._engagement: float = 0.0          # 0-100
-        self._engage_set_time: float = 0.0     # when engagement was last set
-        self._last_eval_time: float = 0.0      # last evaluation timestamp
-        self._messages_since_eval: int = 0
+        self._groups: Dict[int, GroupState] = {}
+        self._on_session_end: Optional[Callable[[int], Awaitable[None]]] = None
+        self._on_flush: Optional[Callable[[int, List[BufferedMessage], float], Awaitable[None]]] = None
 
-        # Random session state
-        self._session_active_until: Optional[float] = None
-        self._next_session_time: Optional[float] = None
-        self._schedule_next_session()
+    def _get_state(self, group_id: int) -> GroupState:
+        if group_id not in self._groups:
+            state = GroupState()
+            self._schedule_next_session(state)
+            self._groups[group_id] = state
+        return self._groups[group_id]
 
-        # Callbacks
-        self._on_session_end: Optional[Callable[[], Awaitable[None]]] = None
-        self._on_flush: Optional[Callable[[List[BufferedMessage], float], Awaitable[None]]] = None
-
-        # Buffer
-        self._buffer: List[BufferedMessage] = []
-        self._eval_task: Optional[asyncio.Task] = None
-
-    # --- Public API ---
-
-    def set_session_end_callback(self, cb: Callable[[], Awaitable[None]]):
+    def set_session_end_callback(self, cb: Callable[[int], Awaitable[None]]):
+        """Callback receives group_id."""
         self._on_session_end = cb
 
-    def set_flush_callback(self, cb: Callable[[List[BufferedMessage], float], Awaitable[None]]):
-        """Callback receives (messages, engagement_level)."""
+    def set_flush_callback(self, cb: Callable[[int, List[BufferedMessage], float], Awaitable[None]]):
+        """Callback receives (group_id, messages, engagement_level)."""
         self._on_flush = cb
 
-    def trigger_active(self, minutes: int = 3, engagement: float = 100):
-        """Trigger active state (e.g. from @-mention)."""
-        self._engagement = engagement
-        self._engage_set_time = time.time()
+    def trigger_active(self, group_id: int, minutes: int = 3, engagement: float = 100):
+        state = self._get_state(group_id)
+        state.engagement = engagement
+        state.engage_set_time = time.time()
         until = time.time() + minutes * 60
-        if self._session_active_until is None or until > self._session_active_until:
-            self._session_active_until = until
-        logger.info("Engagement set to %.0f for %d min", engagement, minutes)
+        if state.session_active_until is None or until > state.session_active_until:
+            state.session_active_until = until
+        logger.info("[Group %d] Engagement %.0f for %d min", group_id, engagement, minutes)
 
-    def get_current_engagement(self) -> float:
-        """Get current engagement level with decay applied."""
-        if self._engagement <= 0:
+    def get_current_engagement(self, group_id: int) -> float:
+        state = self._get_state(group_id)
+        if state.engagement <= 0:
             return 0.0
-        elapsed = time.time() - self._engage_set_time
+        elapsed = time.time() - state.engage_set_time
         decay = elapsed / ENGAGE_DECAY_DURATION * 100
-        return max(0.0, self._engagement - decay)
+        return max(0.0, state.engagement - decay)
 
     async def buffer_message(self, event: GroupMessageEvent) -> Optional[List[BufferedMessage]]:
-        """
-        Buffer a message. Returns messages to process immediately for @-mention,
-        or None if buffered for later evaluation.
-        """
+        gid = event.group_id
+        state = self._get_state(gid)
         msg = BufferedMessage(
             message_id=event.message_id,
             user_id=event.user_id,
             nickname=event.nickname,
             text=event.raw_text,
             is_at_bot=event.is_at_bot,
+            group_id=gid,
         )
 
-        # @-mention: immediate evaluation with high engagement
+        # @-mention: immediate
         if event.is_at_bot:
-            self.trigger_active(3, engagement=100)
-            # Cancel pending eval, flush now
-            if self._eval_task and not self._eval_task.done():
-                self._eval_task.cancel()
-            pending = self._buffer.copy()
-            self._buffer.clear()
+            self.trigger_active(gid, 3, 100)
+            if state.eval_task and not state.eval_task.done():
+                state.eval_task.cancel()
+            pending = state.buffer.copy()
+            state.buffer.clear()
             pending.append(msg)
-            self._messages_since_eval = 0
-            self._last_eval_time = time.time()
+            state.messages_since_eval = 0
+            state.last_eval_time = time.time()
             return pending
 
-        # Add to buffer
-        self._buffer.append(msg)
-        self._messages_since_eval += 1
+        state.buffer.append(msg)
+        state.messages_since_eval += 1
 
-        # Check random session state
-        self._check_random_session()
+        self._check_random_session(gid)
 
-        # Check if it's time to evaluate
-        if self._should_evaluate():
-            return await self._do_evaluate()
+        if self._should_evaluate(state):
+            return await self._do_evaluate(gid, state)
 
-        # Schedule evaluation if not already scheduled
-        if self._eval_task is None or self._eval_task.done():
-            self._eval_task = asyncio.create_task(self._timed_eval())
+        if state.eval_task is None or state.eval_task.done():
+            state.eval_task = asyncio.create_task(self._timed_eval(gid))
 
         return None
 
-    def notify_bot_replied(self):
-        """Boost engagement slightly when bot replies (keeps conversation going)."""
-        current = self.get_current_engagement()
-        boost = min(100, current + 20)
-        self._engagement = boost
-        self._engage_set_time = time.time()
+    def notify_bot_replied(self, group_id: int):
+        state = self._get_state(group_id)
+        current = self.get_current_engagement(group_id)
+        state.engagement = min(100, current + 20)
+        state.engage_set_time = time.time()
 
-    def get_session_status(self) -> str:
-        eng = self.get_current_engagement()
-        if eng > 50:
-            return f"ACTIVE (engagement={eng:.0f})"
-        if eng > 0:
-            return f"Cooling down (engagement={eng:.0f})"
-        if self._session_active_until and time.time() < self._session_active_until:
-            return "Random session active"
-        if self._next_session_time:
-            gap = int(self._next_session_time - time.time())
-            return f"IDLE (next session in {gap // 60}min)"
-        return "IDLE"
+    def get_session_status(self, group_id: int = 0) -> str:
+        if group_id:
+            eng = self.get_current_engagement(group_id)
+            state = self._get_state(group_id)
+            buf_len = len(state.buffer)
+            if eng > 50:
+                return f"ACTIVE (engagement={eng:.0f}, buffer={buf_len})"
+            if eng > 0:
+                return f"Cooling (engagement={eng:.0f}, buffer={buf_len})"
+            if state.session_active_until and time.time() < state.session_active_until:
+                return f"Random session (buffer={buf_len})"
+            if state.next_session_time:
+                gap = int(state.next_session_time - time.time())
+                return f"IDLE (next in {gap // 60}min, buffer={buf_len})"
+            return f"IDLE (buffer={buf_len})"
+        # All groups
+        lines = []
+        for gid in self._groups:
+            lines.append(f"  Group {gid}: {self.get_session_status(gid)}")
+        return "\n".join(lines) if lines else "No groups active"
+
+    def get_all_group_ids(self) -> List[int]:
+        return list(self._groups.keys())
 
     # --- Internal ---
 
-    def _should_evaluate(self) -> bool:
-        """Check if we should evaluate the buffer now."""
-        if not self._buffer:
+    def _should_evaluate(self, state: GroupState) -> bool:
+        if not state.buffer:
             return False
-        # Time-based: 10 seconds since last eval
-        if time.time() - self._last_eval_time >= ENGAGE_EVAL_INTERVAL:
+        if time.time() - state.last_eval_time >= ENGAGE_EVAL_INTERVAL:
             return True
-        # Count-based: 3+ messages since last eval
-        if self._messages_since_eval >= ENGAGE_EVAL_MSG_COUNT:
+        if state.messages_since_eval >= ENGAGE_EVAL_MSG_COUNT:
             return True
         return False
 
-    async def _do_evaluate(self) -> List[BufferedMessage]:
-        """Flush buffer for evaluation."""
-        messages = self._buffer.copy()
-        self._buffer.clear()
-        self._messages_since_eval = 0
-        self._last_eval_time = time.time()
-        logger.debug("Evaluating %d messages (engagement=%.0f)",
-                      len(messages), self.get_current_engagement())
+    async def _do_evaluate(self, group_id: int, state: GroupState) -> List[BufferedMessage]:
+        messages = state.buffer.copy()
+        state.buffer.clear()
+        state.messages_since_eval = 0
+        state.last_eval_time = time.time()
         return messages
 
-    async def _timed_eval(self):
-        """Wait until next evaluation point, then flush."""
+    async def _timed_eval(self, group_id: int):
         try:
             await asyncio.sleep(ENGAGE_EVAL_INTERVAL)
         except asyncio.CancelledError:
             return
-
-        if self._buffer:
-            messages = await self._do_evaluate()
+        state = self._get_state(group_id)
+        if state.buffer:
+            messages = await self._do_evaluate(group_id, state)
             if self._on_flush and messages:
-                engagement = self.get_current_engagement()
-                await self._on_flush(messages, engagement)
+                engagement = self.get_current_engagement(group_id)
+                await self._on_flush(group_id, messages, engagement)
 
-    def _schedule_next_session(self):
+    def _schedule_next_session(self, state: GroupState):
         gap = random.randint(self.session_gap_min, self.session_gap_max)
-        self._next_session_time = time.time() + gap * 60
+        state.next_session_time = time.time() + gap * 60
 
-    def _check_random_session(self) -> bool:
-        """Check and manage random session state."""
+    def _check_random_session(self, group_id: int):
+        state = self._get_state(group_id)
         now = time.time()
-        if self._session_active_until and now < self._session_active_until:
+        if state.session_active_until and now < state.session_active_until:
             return True
-        if self._session_active_until and now >= self._session_active_until:
-            self._session_active_until = None
-            self._schedule_next_session()
-            # Session ended: clear buffer and reset engagement
-            self._buffer.clear()
-            self._engagement = 0
-            self._messages_since_eval = 0
-            logger.info("Random session ended")
+        if state.session_active_until and now >= state.session_active_until:
+            state.session_active_until = None
+            state.buffer.clear()
+            state.engagement = 0
+            state.messages_since_eval = 0
+            self._schedule_next_session(state)
+            logger.info("[Group %d] Random session ended", group_id)
             if self._on_session_end:
-                asyncio.ensure_future(self._on_session_end())
+                asyncio.ensure_future(self._on_session_end(group_id))
             return False
-        if self._next_session_time and now >= self._next_session_time:
+        if state.next_session_time > 0 and now >= state.next_session_time:
             if self._is_active_hour():
                 duration = random.randint(self.session_duration_min, self.session_duration_max)
-                self._session_active_until = now + duration * 60
-                self._engagement = 40
-                self._engage_set_time = now
-                logger.info("Random session started, %d min", duration)
+                state.session_active_until = now + duration * 60
+                state.engagement = 40
+                state.engage_set_time = now
+                logger.info("[Group %d] Random session started, %d min", group_id, duration)
                 return True
             else:
-                self._schedule_next_session()
+                self._schedule_next_session(state)
                 return False
         return False
 

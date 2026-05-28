@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pydantic_settings import BaseSettings
 
 
@@ -9,7 +11,14 @@ class Settings(BaseSettings):
 
     # Bot identity
     bot_qq_id: int = 0
-    target_group_id: int = 0
+    target_group_ids: str = ""  # comma-separated group IDs
+
+    @property
+    def group_ids(self) -> set[int]:
+        """Parse target_group_ids into a set of ints."""
+        if not self.target_group_ids:
+            return set()
+        return {int(x.strip()) for x in self.target_group_ids.split(",") if x.strip()}
 
     # LLM (SiliconFlow)
     mimo_api_key: str = ""

@@ -37,14 +37,14 @@ class PrivateMessageEvent:
 class EventHandler:
     def __init__(self, settings: Settings):
         self.bot_qq_id = settings.bot_qq_id
-        self.target_group_id = settings.target_group_id
+        self.target_group_ids = settings.group_ids
 
     def parse_group_message(self, data: dict) -> GroupMessageEvent | None:
         if data.get("post_type") != "message":
             return None
         if data.get("message_type") != "group":
             return None
-        if data.get("group_id") != self.target_group_id:
+        if self.target_group_ids and data.get("group_id") not in self.target_group_ids:
             return None
 
         segments = data.get("message", [])

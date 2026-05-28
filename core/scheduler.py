@@ -23,7 +23,7 @@ class BackgroundScheduler:
         self.user_memory = user_memory
         self.group_memory = group_memory
         self.llm_client = llm_client
-        self.group_id = settings.target_group_id
+        self.group_ids = settings.group_ids
         self.scheduler = AsyncIOScheduler()
 
     def start(self):
@@ -51,20 +51,15 @@ class BackgroundScheduler:
     async def summarize_recent_chat(self):
         try:
             print("\n[Scheduler] Summarizing recent chat...")
-            messages = await self.group_memory.get_messages_for_summary(
-                self.group_id, limit=100
-            )
-            if len(messages) < 5:
-                print("[Scheduler] Not enough messages, skip")
-                return
-
-            summary = await self.llm_client.summarize_chat(messages)
-            if summary:
-                await self.group_memory.save_memory(
-                    self.group_id, "summary", summary, importance=0.7
-                )
-                print(f"[Scheduler] Chat summary: {summary[:100]}")
-                logger.info("Chat summary saved: %s", summary[:80])
+            for gid in self.group_ids:
+                messages = await self.group_memory.get_messages_for_summary(gid, limit=100)
+                if len(messages) < 5:
+                    print(f"[Scheduler] Group {gid}: not enough messages, skip")
+                    continue
+                summary = await self.llm_client.summarize_chat(messages)
+                if summary:
+                    await self.group_memory.save_memory(gid, "summary", summary, importance=0.7)
+                    print(f"[Scheduler] Group {gid} summary: {summary[:100]}")
         except Exception as e:
             logger.error("Summarize job failed: %s", e)
 
