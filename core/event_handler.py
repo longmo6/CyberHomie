@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional, List
+
+from config import Settings
+from utils.logger import setup_logger
+
+logger = setup_logger("event_handler")
+
+
+@dataclass
+class GroupMessageEvent:
+    group_id: int
+    user_id: int
+    nickname: str
+    message_id: int
+    raw_text: str
+    full_message: str
+    segments: list
+    is_at_bot: bool
+    timestamp: int
+    sender_role: str
+
+
+@dataclass
+class PrivateMessageEvent:
+    user_id: int
+    nickname: str
+    message_id: int
+    raw_text: str
+    full_message: str
+    segments: list
+    timestamp: int
+
+
+class EventHandler:
+    def __init__(self, settings: Settings):
+        self.bot_qq_id = settings.bot_qq_id
+        self.target_group_id = settings.target_group_id
+
+    def parse_group_message(self, data: dict) -> GroupMessageEvent | None:
+        if data.get("post_type") != "message":
+            return None
+        if data.get("message_type") != "group":
+            return None
+        if data.get("group_id") != self.target_group_id:
+            return None
+
+        segments = data.get("message", [])
+        if not isinstance(segments, list):
+            return None
+
+        text_parts: list[str] = []
+        full_parts: list[str] = []
+        is_at_bot = False
+
+        for seg in segments:
+            seg_type = seg.get("type", "")
+            if seg_type == "text":
+                t = seg.get("data", {}).get("text", "")
+                text_parts.append(t)
+                full_parts.append(t)
+            elif seg_type == "at":
+                qq = seg.get("data", {}).get("qq", "")
+                if str(qq) == str(self.bot_qq_id):
+                    is_at_bot = True
+                full_parts.append(f"@{qq}")
+            elif seg_type == "image":
+                full_parts.append("[图片]")
+            elif seg_type == "face":
+                full_parts.append("[表情]")
+            elif seg_type == "reply":
+                continue
+            else:
+                full_parts.append(f"[{seg_type}]")
+
+        sender = data.get("sender", {})
+        nickname = (
+            sender.get("card") or sender.get("nickname") or str(sender.get("user_id", ""))
+        )
+        role = sender.get("role", "member")
+
+        event = GroupMessageEvent(
+            group_id=data.get("group_id", 0),
+            user_id=sender.get("user_id", 0),
+            nickname=nickname,
+            message_id=data.get("message_id", 0),
+            raw_text="".join(text_parts).strip(),
+            full_message="".join(full_parts).strip(),
+            segments=segments,
+            is_at_bot=is_at_bot,
+            timestamp=data.get("time", 0),
+            sender_role=role,
+        )
+
+        logger.debug(
+            "Parsed: [%s] %s (at_bot=%s)", event.nickname, event.raw_text[:50], is_at_bot
+        )
+        return event
+
+    def parse_private_message(self, data: dict) -> PrivateMessageEvent | None:
+        if data.get("post_type") != "message":
+            return None
+        if data.get("message_type") != "private":
+            return None
+
+        segments = data.get("message", [])
+        if not isinstance(segments, list):
+            return None
+
+        text_parts: list[str] = []
+        full_parts: list[str] = []
+
+        for seg in segments:
+            seg_type = seg.get("type", "")
+            if seg_type == "text":
+                t = seg.get("data", {}).get("text", "")
+                text_parts.append(t)
+                full_parts.append(t)
+            elif seg_type == "image":
+                full_parts.append("[图片]")
+            elif seg_type == "face":
+                full_parts.append("[表情]")
+            else:
+                full_parts.append(f"[{seg_type}]")
+
+        sender = data.get("sender", {})
+        nickname = sender.get("nickname") or str(sender.get("user_id", ""))
+
+        event = PrivateMessageEvent(
+            user_id=sender.get("user_id", 0),
+            nickname=nickname,
+            message_id=data.get("message_id", 0),
+            raw_text="".join(text_parts).strip(),
+            full_message="".join(full_parts).strip(),
+            segments=segments,
+            timestamp=data.get("time", 0),
+        )
+
+        logger.debug("Parsed private: [%s] %s", event.nickname, event.raw_text[:50])
+        return event
