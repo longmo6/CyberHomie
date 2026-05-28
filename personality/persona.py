@@ -59,10 +59,12 @@ class Personality:
         prompt += '- 不能每条都回'
 
         if user_context:
-            prompt += f"\n\n你对这个群友的了解：\n{user_context}"
+            prompt += f"\n\n你对这个群友的了解（包含你和ta的互动方式）：\n{user_context}"
+            prompt += "\n根据你和ta的关系调整语气。如果你们习惯开玩笑就开，习惯认真就认真。"
 
         if group_context:
-            prompt += f"\n\n群里最近发生了什么：\n{group_context}"
+            prompt += f"\n\n这个群的记忆（包含你在这个群的行为习惯）：\n{group_context}"
+            prompt += "\n根据这个群的习惯调整你的行为。不同群可以有不同风格。"
 
         prompt += "\n\n现在，像一个真实群友一样回复。简短、随意、自然。"
         return prompt

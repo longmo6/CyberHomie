@@ -368,12 +368,16 @@ class Humanizer:
         return list(self._groups.keys())
 
     def post_process_reply(self, text: str) -> str:
-        """回复后处理：去除AI痕迹、加语气词、截断"""
+        """回复后处理：去除AI痕迹、加语气词、限省略号、截断"""
         if not text:
             return text
         for pattern in FORMAL_PATTERNS:
             text = re.sub(pattern, "", text)
         text = text.strip()
+        # 限制省略号：只保留第一个，其余替换为句号
+        if text.count("...") > 1:
+            parts = text.split("...")
+            text = parts[0] + "..." + "。".join(p for p in parts[1:] if p)
         # 10% 概率加语气词
         if random.random() < 0.10 and text:
             filler = random.choice(FILLER_WORDS)
