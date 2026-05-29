@@ -516,115 +516,19 @@ async def handle_command(cmd: str):
 
     if action == "help":
         print("""
-  users                 列出所有用户
-  status                查看当前状态（参与度、缓冲区、活跃期）
-  user <qq_id>          查看用户详情
-  memory <qq_id>        查看用户记忆文件
-  group                 查看群记忆文件
-  edit <qq_id> <f> <v>  编辑用户字段（nickname/personality_notes/interests/emotional_tendency/quirks）
-  history <qq_id>       查看聊天记录
-  sessions              查看群记忆数据库
-  summarize             立即总结所有用户+群记忆
-  summarize <qq_id>     总结指定用户
-  summarize group       总结群记忆
-  say <消息>            以bot身份发送群消息
-  engage <0-100>        手动设置参与度
-  session start [分钟]  手动开启活跃期（默认5分钟）
-  session stop          手动结束活跃期
-  buffer                查看当前消息缓冲区
-  rel <qq_id>           查看与某人的关系
-  rel <qq_a> <qq_b>     查看两人关系
-  reload                热重载人格配置（不重启）
-  test <消息>           测试LLM回复（不发送到群）
-  debug                 切换实时状态面板模式
-  help                  显示帮助
+  status                      查看所有群状态
+  engage <群号> [0-100]        查看/设置参与度
+  say [群号] <消息>            以bot身份发群消息
+  summarize                   总结所有用户+群记忆
+  summarize <qq_id>           总结指定用户
+  summarize group             总结群记忆
+  debug                       切换实时状态面板
+  help                        显示帮助
 """)
-
-    elif action == "users":
-        rows = await db.fetchall(
-            "SELECT qq_id, nickname, message_count, closeness_score, last_seen "
-            "FROM users ORDER BY message_count DESC"
-        )
-        print(f"\n{'QQ':<15} {'Nick':<15} {'Msgs':<6} {'Closeness':<6} {'Last Seen'}")
-        print("-" * 65)
-        for r in rows:
-            print(f"{r[0]:<15} {r[1]:<15} {r[2]:<6} {r[3]:<6.2f} {r[4]}")
-        print(f"Total: {len(rows)}\n")
 
     elif action == "status":
         print(f"\nGroups: {settings.group_ids}")
         print(humanizer.get_session_status())
-        print(f"DB: {settings.db_path}\n")
-
-    elif action == "user" and len(parts) >= 2:
-        qq_id = int(parts[1])
-        row = await db.fetchone("SELECT * FROM users WHERE qq_id = ?", (qq_id,))
-        if row:
-            print(f"\n=== {row['nickname']} ({row['qq_id']}) ===")
-            print(f"  personality: {row['personality_notes'] or '(empty)'}")
-            print(f"  interests: {row['interests'] or '(empty)'}")
-            print(f"  emotion: {row['emotional_tendency'] or '(empty)'}")
-            print(f"  quirks: {row['quirks'] or '(empty)'}")
-            print(f"  closeness: {row['closeness_score']:.2f}")
-            print(f"  messages: {row['message_count']}")
-            print(f"  first: {row['first_seen']}")
-            print(f"  last: {row['last_seen']}\n")
-        else:
-            print(f"User {qq_id} not found")
-
-    elif action == "memory" and len(parts) >= 2:
-        qq_id = int(parts[1])
-        content = user_file_memory.load(qq_id)
-        if content:
-            print(f"\n=== Memory: {qq_id} ===\n{content}\n")
-        else:
-            print(f"No memory file for {qq_id}")
-
-    elif action == "group":
-        gid = int(parts[1]) if len(parts) >= 2 else list(settings.group_ids)[0] if settings.group_ids else 0
-        content = group_file_memory.load(gid)
-        if content:
-            print(f"\n=== Group memory ({gid}) ===\n{content}\n")
-        else:
-            print(f"No group memory file for {gid}")
-
-    elif action == "edit" and len(parts) >= 4:
-        qq_id = int(parts[1])
-        field = parts[2]
-        value = " ".join(parts[3:])
-        allowed = {"nickname", "personality_notes", "interests", "emotional_tendency", "quirks"}
-        if field in allowed:
-            await db.execute(f"UPDATE users SET {field} = ? WHERE qq_id = ?", (value, qq_id))
-            await db.commit()
-            print(f"Updated {field} for {qq_id}")
-        else:
-            print(f"Allowed fields: {', '.join(allowed)}")
-
-    elif action == "history" and len(parts) >= 2:
-        qq_id = int(parts[1])
-        rows = await db.fetchall(
-            "SELECT nickname, content, is_bot, timestamp FROM chat_history "
-            "WHERE user_id = ? ORDER BY timestamp DESC LIMIT 20",
-            (qq_id,),
-        )
-        print(f"\n=== History: {qq_id} ===")
-        for r in reversed(rows):
-            tag = "[BOT]" if r[2] else "     "
-            print(f"{r[3]} {tag} {r[0]}: {r[1][:80]}")
-        print()
-
-    elif action == "sessions":
-        gid = int(parts[1]) if len(parts) >= 2 else list(settings.group_ids)[0] if settings.group_ids else 0
-        rows = await db.fetchall(
-            "SELECT memory_type, content, importance, created_at FROM group_memory "
-            "WHERE group_id = ? ORDER BY importance DESC",
-            (gid,),
-        )
-        print(f"\n=== Group memory ({gid}) ===")
-        for r in rows:
-            print(f"  [{r[0]}] {r[1][:80]}  ({r[3]})")
-        if not rows:
-            print("  (empty)")
         print()
 
     elif action == "summarize":
@@ -684,99 +588,6 @@ async def handle_command(cmd: str):
         else:
             for gid in settings.group_ids:
                 print(f"  Group {gid}: {humanizer.get_current_engagement(gid):.0f}")
-
-    elif action == "session":
-        if len(parts) >= 3 and parts[1] == "start":
-            gid = int(parts[2])
-            minutes = int(parts[3]) if len(parts) >= 4 else 5
-            humanizer.trigger_active(gid, engagement=60, force=True)
-            print(f"Group {gid} active (engagement=60)")
-        elif len(parts) >= 3 and parts[1] == "stop":
-            gid = int(parts[2])
-            state = humanizer._get_state(gid)
-            state.engagement = 0
-            state.buffer.clear()
-            print(f"Group {gid} session stopped")
-        elif len(parts) >= 2 and parts[1] == "start":
-            # Default: first group
-            gid = list(settings.group_ids)[0] if settings.group_ids else 0
-            minutes = int(parts[2]) if len(parts) >= 3 else 5
-            humanizer.trigger_active(gid, engagement=60, force=True)
-            print(f"Group {gid} active (engagement=60)")
-        elif len(parts) >= 2 and parts[1] == "stop":
-            for gid in settings.group_ids:
-                state = humanizer._get_state(gid)
-                state.engagement = 0
-                state.buffer.clear()
-            print("All sessions stopped")
-        else:
-            print("Usage: session start <群号> [分钟] | session stop <群号>")
-
-    elif action == "buffer":
-        if len(parts) >= 2:
-            gid = int(parts[1])
-            state = humanizer._get_state(gid)
-            buf = state.buffer
-            if buf:
-                print(f"\nBuffer (group {gid}, {len(buf)} messages):")
-                for m in buf:
-                    at = " [@bot]" if m.is_at_bot else ""
-                    print(f"  [{m.nickname}]{at}: {m.text[:60]}")
-            else:
-                print(f"Group {gid} buffer is empty")
-        else:
-            for gid in settings.group_ids:
-                state = humanizer._get_state(gid)
-                print(f"  Group {gid}: {len(state.buffer)} buffered")
-        print()
-
-    elif action == "rel":
-        if len(parts) >= 3:
-            a, b = int(parts[1]), int(parts[2])
-            rel = await relationship.get_user_relationship(a, b)
-            row_a = await db.fetchone("SELECT nickname FROM users WHERE qq_id = ?", (a,))
-            row_b = await db.fetchone("SELECT nickname FROM users WHERE qq_id = ?", (b,))
-            na = row_a[0] if row_a else str(a)
-            nb = row_b[0] if row_b else str(b)
-            if rel:
-                print(f"\n{na} <-> {nb}: {rel['type']}")
-                if rel['notes']:
-                    print(f"  Notes: {rel['notes']}")
-            else:
-                print(f"\n{na} <-> {nb}: no relationship recorded")
-            print()
-        elif len(parts) >= 2:
-            qq_id = int(parts[1])
-            bot_rel = await relationship.get_bot_relationship(qq_id)
-            row = await db.fetchone("SELECT nickname FROM users WHERE qq_id = ?", (qq_id,))
-            name = row[0] if row else str(qq_id)
-            print(f"\nBot <-> {name}: {bot_rel}")
-            print()
-        else:
-            print("Usage: rel <qq_id> | rel <qq_a> <qq_b>")
-
-    elif action == "reload":
-        personality.__init__()
-        print(f"Personality reloaded: {personality.name}")
-
-    elif action == "test":
-        if len(parts) >= 2:
-            msg = " ".join(parts[1:])
-            gid = list(settings.group_ids)[0] if settings.group_ids else 0
-            user_ctx = ""
-            group_ctx_list = await group_memory.get_important_memories(gid)
-            group_file = build_group_context(gid)
-            if group_file:
-                group_ctx_list.append(group_file)
-            history = await build_chat_history(gid)
-            sys_prompt = personality.get_system_prompt(user_ctx, "\n".join(group_ctx_list))
-            reply = await llm_client.generate_reply(sys_prompt, history, msg)
-            if reply:
-                print(f"\nLLM reply: {reply}\n")
-            else:
-                print("LLM returned empty")
-        else:
-            print("Usage: test <消息>")
 
     elif action == "debug":
         global _debug_mode
