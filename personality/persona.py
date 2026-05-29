@@ -26,7 +26,6 @@ class Personality:
         self.forbidden_patterns: list[str] = cfg.get("forbidden_patterns", [])
         self.nicknames: list[str] = cfg.get("nicknames", ["群友"])
         self.mood_examples: dict[str, list[str]] = cfg.get("mood_examples", {})
-        self.typing_habits: list[str] = cfg.get("typing_habits", [])
 
         logger.info("Personality loaded: %s", self.name)
 
@@ -37,11 +36,6 @@ class Personality:
         prompt += self.persona_description.strip() + "\n\n"
         prompt += "说话风格：\n"
         prompt += "\n".join(f"- {rule}" for rule in self.style_rules)
-
-        # Typing habits
-        if self.typing_habits:
-            prompt += "\n\n打字习惯：\n"
-            prompt += "\n".join(f"- {h}" for h in self.typing_habits)
 
         # Random mood example
         if self.mood_examples:
