@@ -209,17 +209,23 @@ async def typing_delay(text: str):
 
 
 def split_message(text: str) -> list[str]:
-    """拆分长消息：按换行拆分，空行合并，每段不超过150字"""
+    """拆分消息：按换行和省略号拆分，模拟真人分条发消息"""
     parts = []
     for line in text.split("\n"):
         line = line.strip()
         if not line:
             continue
-        if len(line) > 150:
-            for i in range(0, len(line), 150):
-                parts.append(line[i:i+150])
-        else:
-            parts.append(line)
+        # 按省略号拆分
+        segments = re.split(r"\.{3,}|…", line)
+        for seg in segments:
+            seg = seg.strip()
+            if not seg:
+                continue
+            if len(seg) > 150:
+                for i in range(0, len(seg), 150):
+                    parts.append(seg[i:i+150])
+            else:
+                parts.append(seg)
     return parts if parts else [text]
 
 
