@@ -189,9 +189,11 @@ async def build_chat_history(group_id: int, limit: int = 50) -> list[dict]:
     history = []
     for msg in raw_msgs:
         if msg["role"] == "assistant":
-            history.append({"role": "assistant", "content": msg["content"]})
+            # bot 的消息带名字，让 LLM 知道是自己说的
+            history.append({"role": "assistant", "content": f'[小夜] {msg["content"]}'})
         else:
-            history.append({"role": "user", "content": f'{msg["nickname"]}: {msg["content"]}'})
+            # 其他人的消息带名字
+            history.append({"role": "user", "content": f'[{msg["nickname"]}] {msg["content"]}'})
     return history
 
 
@@ -413,9 +415,9 @@ async def handle_private_message(event: PrivateMessageEvent):
     chat_history = []
     for msg in raw_msgs:
         if msg["role"] == "assistant":
-            chat_history.append({"role": "assistant", "content": msg["content"]})
+            chat_history.append({"role": "assistant", "content": f'[小夜] {msg["content"]}'})
         else:
-            chat_history.append({"role": "user", "content": msg["content"]})
+            chat_history.append({"role": "user", "content": f'[{msg["nickname"]}] {msg["content"]}'})
 
     sys_prompt = personality.get_private_system_prompt(user_ctx)
 
