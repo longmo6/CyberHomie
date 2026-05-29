@@ -67,6 +67,12 @@ async def on_session_end(group_id: int):
 # --- Proactive topic generation ---
 _last_topic_time: Dict[int, float] = {}  # 上次开话题时间（防重复）
 
+# --- 私聊参与度 ---
+_private_reply_count: Dict[int, int] = {}  # user_id -> 连续回复次数
+_private_last_reply: Dict[int, float] = {}  # user_id -> 上次回复时间
+_PRIVATE_MAX_REPLIES = 15  # 连续回复超过此数停止回复
+_PRIVATE_COOLDOWN = 1800   # 停止后冷却30分钟
+
 
 async def topic_loop():
     """活跃期内，安静一段时间后主动开话题。"""
@@ -388,6 +394,16 @@ async def handle_group_message(event: GroupMessageEvent):
 async def handle_private_message(event: PrivateMessageEvent):
     logger.info("[私聊][%s] %s", event.nickname, event.raw_text[:80])
 
+    # 私聊参与度检查
+    count = _private_reply_count.get(event.user_id, 0)
+    if count >= _PRIVATE_MAX_REPLIES:
+        # 冷却中，检查是否过了冷却期
+        last_reply = _private_last_reply.get(event.user_id, 0)
+        if time.time() - last_reply > _PRIVATE_COOLDOWN:
+            _private_reply_count[event.user_id] = 0  # 重置
+        else:
+            return  # 还在冷却中
+
     await user_memory.get_or_create_user(event.user_id, event.nickname)
     await user_memory.increment_message_count(event.user_id)
     await group_memory.save_message(0, event.user_id, event.nickname, event.raw_text)
@@ -402,6 +418,13 @@ async def handle_private_message(event: PrivateMessageEvent):
             chat_history.append({"role": "user", "content": msg["content"]})
 
     sys_prompt = personality.get_private_system_prompt(user_ctx)
+
+    # 根据连续回复次数调整行为
+    if count > 10:
+        sys_prompt += "\n\n你已经聊了很久了，开始有点累了。回复变短变敷衍，可以只回一个字或表情。"
+    elif count > 5:
+        sys_prompt += "\n\n你聊了一会儿了，开始有点想做别的事了。回复可以简短一些。"
+
     reply = await llm_client.generate_reply(
         sys_prompt, chat_history, event.raw_text,
         images=event.images if event.images else None,
@@ -416,6 +439,8 @@ async def handle_private_message(event: PrivateMessageEvent):
         return
     await typing_delay(reply)
     await send_private_split(event.user_id, reply)
+    _private_reply_count[event.user_id] = count + 1
+    _private_last_reply[event.user_id] = time.time()
 
     await group_memory.save_message(
         0, settings.bot_qq_id, personality.name, reply, is_bot=True
