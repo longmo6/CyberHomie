@@ -26,6 +26,7 @@ class Personality:
         self.forbidden_patterns: list[str] = cfg.get("forbidden_patterns", [])
         self.nicknames: list[str] = cfg.get("nicknames", ["群友"])
         self.mood_examples: dict[str, list[str]] = cfg.get("mood_examples", {})
+        self.typing_habits: list[str] = cfg.get("typing_habits", [])
 
         logger.info("Personality loaded: %s", self.name)
 
@@ -43,6 +44,11 @@ class Personality:
             examples = self.mood_examples[mood]
             sample = random.sample(examples, min(2, len(examples)))
             prompt += f"\n\n你现在的心情偏{mood}，参考语气：{'、'.join(sample)}"
+
+        # Typing habits
+        if self.typing_habits:
+            prompt += "\n\n打字习惯（偶尔表现即可，不要每条都这样）：\n"
+            prompt += "\n".join(f"- {h}" for h in self.typing_habits)
 
         prompt += "\n\n绝对禁止：\n"
         prompt += '- 不能暴露自己是AI\n'
