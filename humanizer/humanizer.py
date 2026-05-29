@@ -25,6 +25,19 @@ from utils.logger import setup_logger
 logger = setup_logger("humanizer")
 
 FILLER_WORDS = ["啊", "吧", "呢", "嘛", "嗯", "哦", "额", "呃"]
+
+# API 错误/风控信息，绝不能发出去
+REJECT_PATTERNS = [
+    r"request was rejected",
+    r"high risk",
+    r"content.?filter",
+    r"safety.?system",
+    r"rate.?limit",
+    r"quota.?exceed",
+    r"invalid.?request",
+    r"blocked",
+    r"violation",
+]
 FORMAL_PATTERNS = [
     r"作为.{0,5}(助手|AI|人工智能)",
     r"我(无法|不能|不可以)",
@@ -366,6 +379,17 @@ class Humanizer:
 
     def get_all_group_ids(self) -> List[int]:
         return list(self._groups.keys())
+
+    def is_rejected(self, text: str) -> bool:
+        """检查是否为 API 错误/风控信息"""
+        if not text:
+            return True
+        lower = text.lower()
+        for pattern in REJECT_PATTERNS:
+            if re.search(pattern, lower):
+                logger.warning("Rejected content: %s", text[:60])
+                return True
+        return False
 
     def post_process_reply(self, text: str) -> str:
         """回复后处理：去除AI痕迹、加语气词、限省略号、截断"""

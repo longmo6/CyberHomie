@@ -106,6 +106,8 @@ async def topic_loop():
                     continue
 
                 topic = humanizer.post_process_reply(topic)
+                if humanizer.is_rejected(topic):
+                    continue
                 await typing_delay(topic)
                 await api_client.send_group_message(gid, topic)
                 humanizer.notify_bot_replied(gid)
@@ -249,6 +251,8 @@ async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: f
             continue
 
         text = humanizer.post_process_reply(text)
+        if humanizer.is_rejected(text):
+            continue
         reply_to = msg_id if quote else 0
 
         await typing_delay(text)
@@ -365,6 +369,8 @@ async def handle_group_message(event: GroupMessageEvent):
             continue
 
         text = humanizer.post_process_reply(text)
+        if humanizer.is_rejected(text):
+            continue
         reply_to = msg_id if quote else 0
 
         await typing_delay(text)
@@ -406,6 +412,8 @@ async def handle_private_message(event: PrivateMessageEvent):
         return
 
     reply = humanizer.post_process_reply(reply)
+    if humanizer.is_rejected(reply):
+        return
     await typing_delay(reply)
     await send_private_split(event.user_id, reply)
 
