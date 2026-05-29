@@ -22,6 +22,7 @@ class GroupMessageEvent:
     timestamp: int
     sender_role: str
     images: list = None  # list of image URLs
+    has_sticker: bool = False
 
     def __post_init__(self):
         if self.images is None:
@@ -38,6 +39,7 @@ class PrivateMessageEvent:
     segments: list
     timestamp: int
     images: list = None
+    has_sticker: bool = False
 
     def __post_init__(self):
         if self.images is None:
@@ -65,6 +67,7 @@ class EventHandler:
         full_parts: list[str] = []
         image_urls: list[str] = []
         is_at_bot = False
+        has_sticker = False
 
         for seg in segments:
             seg_type = seg.get("type", "")
@@ -78,10 +81,15 @@ class EventHandler:
                     is_at_bot = True
                 full_parts.append(f"@{qq}")
             elif seg_type == "image":
+                sub_type = seg.get("data", {}).get("subType", 0)
                 url = seg.get("data", {}).get("url", "")
                 if url:
                     image_urls.append(url)
-                full_parts.append("[图片]")
+                if sub_type == 1:
+                    has_sticker = True
+                    full_parts.append("[表情包]")
+                else:
+                    full_parts.append("[图片]")
             elif seg_type == "face":
                 full_parts.append("[表情]")
             elif seg_type == "reply":
@@ -107,6 +115,7 @@ class EventHandler:
             timestamp=data.get("time", 0),
             sender_role=role,
             images=image_urls,
+            has_sticker="[表情包]" in "".join(full_parts),
         )
 
         logger.debug(
@@ -135,10 +144,14 @@ class EventHandler:
                 text_parts.append(t)
                 full_parts.append(t)
             elif seg_type == "image":
+                sub_type = seg.get("data", {}).get("subType", 0)
                 url = seg.get("data", {}).get("url", "")
                 if url:
                     image_urls.append(url)
-                full_parts.append("[图片]")
+                if sub_type == 1:
+                    full_parts.append("[表情包]")
+                else:
+                    full_parts.append("[图片]")
             elif seg_type == "face":
                 full_parts.append("[表情]")
             else:
@@ -156,6 +169,7 @@ class EventHandler:
             segments=segments,
             timestamp=data.get("time", 0),
             images=image_urls,
+            has_sticker="[表情包]" in "".join(full_parts),
         )
 
         logger.debug("Parsed private: [%s] %s", event.nickname, event.raw_text[:50])

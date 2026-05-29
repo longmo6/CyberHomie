@@ -309,6 +309,7 @@ async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: f
             "text": m.text,
             "is_at_bot": m.is_at_bot,
             "images": m.images,
+            "has_sticker": m.has_sticker,
         }
         for m in messages
     ]
@@ -434,6 +435,7 @@ async def handle_group_message(event: GroupMessageEvent):
             "text": m.text,
             "is_at_bot": m.is_at_bot,
             "images": m.images,
+            "has_sticker": m.has_sticker,
         }
         for m in pending
     ]

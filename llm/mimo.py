@@ -113,12 +113,17 @@ class LLMClient:
         Given buffered messages, decide which to reply to.
         Returns list of {"message_id": int, "text": str, "quote": bool}
         """
-        # Build message list, noting which have images
+        # Build message list, distinguishing stickers from regular images
         msg_list = ""
         all_images = []
         for m in buffered:
             at_tag = " [@bot]" if m.get("is_at_bot") else ""
-            img_tag = " [含图片]" if m.get("images") else ""
+            if m.get("has_sticker"):
+                img_tag = " [表情包]"
+            elif m.get("images"):
+                img_tag = " [含图片]"
+            else:
+                img_tag = ""
             msg_list += f'[id={m["message_id"]}] {m["nickname"]}{at_tag}{img_tag}: {m["text"]}\n'
             all_images.extend(m.get("images", []))
 
@@ -133,6 +138,7 @@ class LLMClient:
             "- 只有明显和你无关的（别人@别人、别人之间的私聊）才不回\n"
             "- 被质疑是AI时不要死不承认，可以无语、反问、岔开话题\n"
             "- 如果有图片可以回应\n"
+            "- 表情包不要较真分析，可以忽略、回语气词、或者不回\n"
             "- 如果你对这个人有记忆，可以自然融入语气，但不要说\"我记得\"\n\n"
             "引用回复规则（非常重要）：\n"
             "- 绝大多数回复不要引用（quote=false），直接说就行\n"

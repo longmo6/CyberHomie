@@ -73,6 +73,7 @@ class BufferedMessage:
     is_at_bot: bool
     group_id: int = 0
     images: List[str] = field(default_factory=list)  # image URLs
+    has_sticker: bool = False  # 是否包含表情包
     timestamp: float = field(default_factory=time.time)
 
 
@@ -214,6 +215,7 @@ class Humanizer:
             is_at_bot=event.is_at_bot,
             group_id=gid,
             images=event.images or [],
+            has_sticker=event.has_sticker,
         )
 
         # @-mention：立即处理，触发高活跃
