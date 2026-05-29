@@ -64,8 +64,95 @@ async def on_session_end(group_id: int):
     print("[Memory] Done.\n")
 
 
-# --- Proactive topic generation ---
-_last_topic_time: Dict[int, float] = {}  # 上次开话题时间（防重复）
+# --- Session check loop (定期检查是否该出没) ---
+async def session_check_loop():
+    while True:
+        try:
+            await asyncio.sleep(60)
+            for gid in list(settings.group_ids):
+                humanizer._check_random_session(gid)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Session check error: %s", e)
+
+
+# --- Terminal Dashboard ---
+_debug_mode = False
+_dashboard_lines = 0  # how many lines the dashboard occupies
+
+
+def _render_dashboard():
+    """Render a real-time status dashboard to terminal."""
+    global _dashboard_lines
+    if not _debug_mode:
+        return
+
+    lines = []
+    lines.append("═" * 60)
+    lines.append("  CyberHomie Debug Dashboard")
+    lines.append("═" * 60)
+
+    for gid in settings.group_ids:
+        state = humanizer._get_state(gid)
+        eng = humanizer.get_current_engagement(gid)
+        fat = state.fatigue
+
+        if humanizer.is_active(gid):
+            buf_count = len(state.buffer)
+            threshold = humanizer.get_buffer_threshold(gid)
+            decay_left = int(300 * eng / 100)
+            replied = len(state.active_users)
+            status = f"ACTIVE (~{decay_left}s)"
+            lines.append(f"  Group {gid}")
+            lines.append(f"    Status:  {status}")
+            lines.append(f"    Engage:  {'█' * int(eng / 5)}{'░' * (20 - int(eng / 5))} {eng:.0f}/100")
+            lines.append(f"    Fatigue: {'█' * int(fat / 5)}{'░' * (20 - int(fat / 5))} {fat:.0f}/100")
+            lines.append(f"    Buffer:  {buf_count}/{threshold} msgs")
+            lines.append(f"    Replied: {replied} users")
+        elif state.next_session_time:
+            gap = int(state.next_session_time - time.time())
+            lines.append(f"  Group {gid}")
+            lines.append(f"    Status:  IDLE (next in {gap // 60}m{gap % 60}s)")
+        else:
+            lines.append(f"  Group {gid}")
+            lines.append(f"    Status:  IDLE")
+        lines.append(f"    Followup:  {_followup_count.get(gid, 0)}/{_MAX_FOLLOWUPS_PER_SESSION}")
+
+    # Private chat
+    if _private_reply_count:
+        lines.append("  Private Chats:")
+        for uid, count in sorted(_private_reply_count.items(), key=lambda x: -x[1]):
+            if count > 0:
+                lines.append(f"    {uid}: {count} replies")
+
+    lines.append("═" * 60)
+    lines.append("  Type 'debug' to toggle | 'help' for commands")
+    lines.append("═" * 60)
+
+    # Move cursor up to overwrite previous dashboard
+    if _dashboard_lines > 0:
+        print(f"\033[{_dashboard_lines}A", end="")
+
+    # Clear and print
+    for line in lines:
+        print(f"\033[2K{line}")
+
+    _dashboard_lines = len(lines)
+
+
+async def dashboard_loop():
+    """Refresh dashboard every 2 seconds."""
+    while True:
+        try:
+            await asyncio.sleep(2)
+            if _debug_mode:
+                _render_dashboard()
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+
 
 # --- 私聊参与度 ---
 _private_reply_count: Dict[int, int] = {}  # user_id -> 连续回复次数
@@ -74,58 +161,43 @@ _PRIVATE_MAX_REPLIES = 15  # 连续回复超过此数停止回复
 _PRIVATE_COOLDOWN = 1800   # 停止后冷却30分钟
 
 
-async def topic_loop():
-    """活跃期内，安静一段时间后主动开话题。"""
-    while True:
-        try:
-            await asyncio.sleep(60)  # 每分钟检查一次
-            for gid in list(settings.group_ids):
-                humanizer._check_random_session(gid)
-                state = humanizer._get_state(gid)
+async def on_session_start(group_id: int):
+    """随机出没启动时，根据最后一条消息决定是否开话题。"""
+    # 检查最后一条消息
+    last_msgs = await group_memory.get_recent_messages(group_id, limit=1)
+    if last_msgs and last_msgs[0].get("role") == "assistant":
+        logger.info("[Group %d] Session started, last msg is bot's, skip topic", group_id)
+        return  # bot 自己发的，不开话题（防止深夜自言自语）
 
-                # 必须在活跃期中
-                if state.session_active_until is None or time.time() >= state.session_active_until:
-                    continue
+    last_msg_time = _last_group_msg_time.get(group_id, 0)
+    if last_msg_time > 0 and time.time() - last_msg_time < 300:
+        logger.info("[Group %d] Session started, recent chat detected, joining via buffer", group_id)
+        return  # 有人在聊（<5分钟），通过缓冲区参与，不开话题
 
-                # 距离上次开话题至少 5 分钟
-                last_topic = _last_topic_time.get(gid, 0)
-                if time.time() - last_topic < 300:
-                    continue
+    # 安静超过 5 分钟，开话题
+    group_file = build_group_context(group_id)
+    history = await build_chat_history(group_id, limit=30)
+    group_ctx_list = await group_memory.get_important_memories(group_id)
+    if group_file:
+        group_ctx_list.append(group_file)
 
-                # 上条消息是自己发的就不开（避免自言自语）
-                last_msgs = await group_memory.get_recent_messages(gid, limit=1)
-                if last_msgs and last_msgs[0].get("role") == "assistant":
-                    continue
+    topic = await llm_client.generate_topic(
+        personality.get_system_prompt("", "\n".join(group_ctx_list)),
+        history,
+    )
+    if not topic or personality.check_forbidden(topic):
+        return
 
-                # 开话题
-                group_file = build_group_context(gid)
-                history = await build_chat_history(gid, limit=30)
-                group_ctx_list = await group_memory.get_important_memories(gid)
-                if group_file:
-                    group_ctx_list.append(group_file)
-
-                topic = await llm_client.generate_topic(
-                    personality.get_system_prompt("", "\n".join(group_ctx_list)),
-                    history,
-                )
-                if not topic or personality.check_forbidden(topic):
-                    continue
-
-                topic = humanizer.post_process_reply(topic)
-                if humanizer.is_rejected(topic):
-                    continue
-                await typing_delay(topic)
-                await api_client.send_group_message(gid, topic)
-                humanizer.notify_bot_replied(gid)
-                _last_topic_time[gid] = time.time()
-                logger.info("[Bot][群%d][主动] -> %s", gid, topic[:60])
-                await group_memory.save_message(
-                    gid, settings.bot_qq_id, personality.name, topic, is_bot=True
-                )
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error("Topic loop error: %s", e)
+    topic = humanizer.post_process_reply(topic)
+    if humanizer.is_rejected(topic):
+        return
+    await typing_delay(topic)
+    await api_client.send_group_message(group_id, topic)
+    humanizer.notify_bot_replied(group_id)
+    logger.info("[Bot][群%d][主动] -> %s", group_id, topic[:60])
+    await group_memory.save_message(
+        group_id, settings.bot_qq_id, personality.name, topic, is_bot=True
+    )
 
 
 # --- Typing delay ---
@@ -225,15 +297,10 @@ async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: f
     sys_prompt = personality.get_system_prompt(user_ctx, "\n".join(group_ctx_list))
 
     fatigue = humanizer.get_fatigue(group_id)
-    if engagement > 70:
-        if fatigue > 60:
-            sys_prompt += "\n\n你正在参与讨论，但已经有点累了。回复变短变敷衍，可以只回半句或表情。"
-        else:
-            sys_prompt += "\n\n你现在比较积极，可以参与讨论。但不要每条都回，选择有意思的回。"
-    elif engagement > 30:
-        sys_prompt += "\n\n你正在慢慢退出聊天，只回复直接问你的或者特别有意思的。可以敷衍。"
-    else:
-        sys_prompt += "\n\n你已经不太想聊了，除非有特别有意思的内容否则不回复。"
+    if fatigue > 60:
+        sys_prompt += "\n\n你已经聊了一会儿了，有点累了。回复变短变敷衍，可以只回半句或表情。"
+    elif fatigue > 30:
+        sys_prompt += "\n\n你聊了一阵了，可以适当敷衍一些。"
 
     buffered_data = [
         {
@@ -246,7 +313,11 @@ async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: f
         for m in messages
     ]
 
+    print(f"[LLM] Processing {len(messages)} messages (engagement={engagement:.0f}, fatigue={fatigue:.0f})")
     replies = await llm_client.decide_replies(sys_prompt, history, buffered_data)
+
+    if not replies:
+        print("[LLM] No reply needed")
 
     for reply in replies:
         text = reply.get("text", "")
@@ -285,6 +356,7 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_event_loop()
     await db.initialize()
 
+    humanizer.set_session_start_callback(on_session_start)
     humanizer.set_session_end_callback(on_session_end)
     humanizer.set_flush_callback(on_flush)
 
@@ -306,12 +378,14 @@ async def lifespan(app: FastAPI):
     import threading
     terminal_thread = threading.Thread(target=terminal_loop, daemon=True)
     terminal_thread.start()
-    topic_task = asyncio.create_task(topic_loop())
+    session_task = asyncio.create_task(session_check_loop())
+    dash_task = asyncio.create_task(dashboard_loop())
     print("\nType 'help' for commands.\n")
 
     yield
 
-    topic_task.cancel()
+    session_task.cancel()
+    dash_task.cancel()
 
     if napcat_process and napcat_process.poll() is None:
         napcat_process.terminate()
@@ -364,7 +438,11 @@ async def handle_group_message(event: GroupMessageEvent):
         for m in pending
     ]
 
+    print(f"[LLM] Processing {len(pending)} messages (@-mention)")
     replies = await llm_client.decide_replies(sys_prompt, history, buffered_data)
+
+    if not replies:
+        print("[LLM] No reply needed")
 
     for reply in replies:
         text = reply.get("text", "")
@@ -383,7 +461,7 @@ async def handle_group_message(event: GroupMessageEvent):
 
         await typing_delay(text)
         await send_group_split(event.group_id, text, reply_to=reply_to)
-        humanizer.notify_bot_replied(event.group_id, from_at=True)
+        humanizer.notify_bot_replied(event.group_id)
 
         await group_memory.save_message(
             event.group_id, settings.bot_qq_id, personality.name, text, is_bot=True
@@ -518,7 +596,7 @@ async def handle_command(cmd: str):
   rel <qq_a> <qq_b>     查看两人关系
   reload                热重载人格配置（不重启）
   test <消息>           测试LLM回复（不发送到群）
-  debug                 切换详细日志模式
+  debug                 切换实时状态面板模式
   help                  显示帮助
 """)
 
@@ -658,7 +736,7 @@ async def handle_command(cmd: str):
     elif action == "engage":
         if len(parts) >= 3:
             gid, level = int(parts[1]), float(parts[2])
-            humanizer.trigger_active(gid, 3, engagement=level)
+            humanizer.trigger_active(gid, engagement=level)
             print(f"Group {gid} engagement set to {level}")
         elif len(parts) >= 2:
             gid = int(parts[1])
@@ -671,12 +749,11 @@ async def handle_command(cmd: str):
         if len(parts) >= 3 and parts[1] == "start":
             gid = int(parts[2])
             minutes = int(parts[3]) if len(parts) >= 4 else 5
-            humanizer.trigger_active(gid, minutes, engagement=60)
-            print(f"Group {gid} active for {minutes} min")
+            humanizer.trigger_active(gid, engagement=60)
+            print(f"Group {gid} active (engagement=60)")
         elif len(parts) >= 3 and parts[1] == "stop":
             gid = int(parts[2])
             state = humanizer._get_state(gid)
-            state.session_active_until = None
             state.engagement = 0
             state.buffer.clear()
             print(f"Group {gid} session stopped")
@@ -684,12 +761,11 @@ async def handle_command(cmd: str):
             # Default: first group
             gid = list(settings.group_ids)[0] if settings.group_ids else 0
             minutes = int(parts[2]) if len(parts) >= 3 else 5
-            humanizer.trigger_active(gid, minutes, engagement=60)
-            print(f"Group {gid} active for {minutes} min")
+            humanizer.trigger_active(gid, engagement=60)
+            print(f"Group {gid} active (engagement=60)")
         elif len(parts) >= 2 and parts[1] == "stop":
             for gid in settings.group_ids:
                 state = humanizer._get_state(gid)
-                state.session_active_until = None
                 state.engagement = 0
                 state.buffer.clear()
             print("All sessions stopped")
@@ -763,12 +839,13 @@ async def handle_command(cmd: str):
             print("Usage: test <消息>")
 
     elif action == "debug":
-        import logging
-        lvl = logging.DEBUG if logger.level > logging.DEBUG else logging.INFO
-        logger.setLevel(lvl)
-        logging.getLogger("humanizer").setLevel(lvl)
-        logging.getLogger("event_handler").setLevel(lvl)
-        print(f"Log level: {'DEBUG' if lvl == logging.DEBUG else 'INFO'}")
+        global _debug_mode
+        _debug_mode = not _debug_mode
+        if _debug_mode:
+            print("\n[Debug] Dashboard ON (refreshes every 2s)")
+            _render_dashboard()
+        else:
+            print("\n[Debug] Dashboard OFF")
 
     else:
         print(f"Unknown: {action}. Type 'help'.")

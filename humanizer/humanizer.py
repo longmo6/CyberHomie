@@ -49,23 +49,17 @@ FORMAL_PATTERNS = [
     r"希望(对)?你(有)?帮助",
 ]
 
-# --- 评估触发条件 ---
-ENGAGE_EVAL_INTERVAL = 10.0    # 每 10 秒评估一次
-ENGAGE_EVAL_MSG_COUNT = 3      # 或每 3 条消息评估一次
-ENGAGE_DECAY_DURATION = 180.0  # 参与度从 100 衰减到 0 的秒数（3分钟）
+# --- 参与度衰减 ---
+ENGAGE_DECAY_DURATION = 300.0  # 参与度从 100 衰减到 0 的秒数（5分钟）
 
 # --- 深夜出没参数（0:00-8:00）---
 NIGHT_GAP_MIN = 10             # 出没间隔最小（分钟）
 NIGHT_GAP_MAX = 30             # 出没间隔最大（分钟）
-NIGHT_DURATION_MIN = 5         # 每次出没最短（分钟）
-NIGHT_DURATION_MAX = 15        # 每次出没最长（分钟）
 NIGHT_ENGAGEMENT = 50          # 出没时初始参与度
 
 # --- 白天出没参数（8:00-0:00）---
 DAY_GAP_MIN = 40               # 出没间隔最小（分钟）
 DAY_GAP_MAX = 90               # 出没间隔最大（分钟）
-DAY_DURATION_MIN = 2           # 每次出没最短（分钟）
-DAY_DURATION_MAX = 5           # 每次出没最长（分钟）
 DAY_ENGAGEMENT = 30            # 出没时初始参与度
 
 
@@ -84,18 +78,15 @@ class BufferedMessage:
 
 @dataclass
 class GroupState:
-    """每个群独立的状态：参与度、活跃期、缓冲区"""
-    engagement: float = 0.0           # 当前参与度 0-100
+    """每个群独立的状态：参与度、缓冲区"""
+    engagement: float = 0.0           # 当前参与度 0-100，>0就是活跃
     engage_set_time: float = 0.0      # 参与度设定时间（用于计算衰减）
-    last_eval_time: float = 0.0       # 上次评估时间
-    messages_since_eval: int = 0      # 上次评估后的消息数
-    session_active_until: Optional[float] = None  # 活跃期结束时间戳
     next_session_time: float = 0.0    # 下次随机出没的时间戳
     buffer: List[BufferedMessage] = field(default_factory=list)  # 消息缓冲区
-    eval_task: Optional[asyncio.Task] = None  # 定时评估任务
     fatigue: float = 0.0              # 疲惫值 0-100，越高越敷衍
-    reply_count: int = 0              # 本轮活跃期已回复次数
-    active_users: set = field(default_factory=set)  # 本轮活跃过的用户ID
+    fatigue_set_time: float = 0.0     # 疲惫值设定时间（独立衰减）
+    reply_count: int = 0              # 本轮已回复次数
+    active_users: set = field(default_factory=set)  # 本轮被回复过的用户ID
 
 
 class Humanizer:
@@ -110,6 +101,7 @@ class Humanizer:
             self._get_state(gid)
 
         # 回调函数
+        self._on_session_start: Optional[Callable[[int], Awaitable[None]]] = None
         self._on_session_end: Optional[Callable[[int], Awaitable[None]]] = None
         self._on_flush: Optional[Callable[[int, List[BufferedMessage], float], Awaitable[None]]] = None
 
@@ -121,6 +113,9 @@ class Humanizer:
             self._groups[group_id] = state
         return self._groups[group_id]
 
+    def set_session_start_callback(self, cb: Callable[[int], Awaitable[None]]):
+        self._on_session_start = cb
+
     def set_session_end_callback(self, cb: Callable[[int], Awaitable[None]]):
         self._on_session_end = cb
 
@@ -131,15 +126,16 @@ class Humanizer:
     # 参与度管理
     # ============================================================
 
-    def trigger_active(self, group_id: int, minutes: int = 3, engagement: float = 100):
-        """外部触发活跃状态（如被 @-mention）"""
+    def trigger_active(self, group_id: int, engagement: float = 100):
+        """设置参与度（@-mention / 随机出没）"""
         state = self._get_state(group_id)
         state.engagement = engagement
         state.engage_set_time = time.time()
-        until = time.time() + minutes * 60
-        if state.session_active_until is None or until > state.session_active_until:
-            state.session_active_until = until
-        logger.info("[Group %d] Engagement %.0f for %d min", group_id, engagement, minutes)
+        logger.info("[Group %d] Engagement set to %.0f", group_id, engagement)
+
+    def is_active(self, group_id: int) -> bool:
+        """参与度 > 0 就是活跃"""
+        return self.get_current_engagement(group_id) > 0
 
     def get_current_engagement(self, group_id: int) -> float:
         """计算当前参与度（含时间衰减）"""
@@ -150,16 +146,12 @@ class Humanizer:
         decay = elapsed / ENGAGE_DECAY_DURATION * 100
         return max(0.0, state.engagement - decay)
 
-    def notify_bot_replied(self, group_id: int, from_at: bool = False):
-        """bot 回复后提升参与度。随机出没期间累积疲惫值。"""
+    def notify_bot_replied(self, group_id: int):
+        """bot 回复后累积疲惫值。"""
         state = self._get_state(group_id)
-        current = self.get_current_engagement(group_id)
-        state.engagement = min(100, current + 20)
-        state.engage_set_time = time.time()
-        # 只在随机出没期间累积疲惫，@-mention 不算
-        if not from_at and state.session_active_until:
-            state.reply_count += 1
-            state.fatigue = min(100, state.fatigue + 5 + state.reply_count)
+        state.reply_count += 1
+        state.fatigue = min(100, state.fatigue + 5 + state.reply_count)
+        state.fatigue_set_time = time.time()
 
     def record_replied_user(self, group_id: int, user_id: int):
         """记录本轮被bot回复过的用户（只有真正互动过的人）"""
@@ -172,26 +164,45 @@ class Humanizer:
         return state.active_users.copy()
 
     def get_fatigue(self, group_id: int) -> float:
-        """获取当前疲惫值（含时间衰减：每30秒减1）"""
+        """获取当前疲惫值（含时间衰减：每10秒减1）"""
         state = self._get_state(group_id)
         if state.fatigue <= 0:
             return 0.0
-        # 按时间衰减
-        if state.engage_set_time > 0:
-            elapsed = time.time() - state.engage_set_time
-            decay = elapsed / 10  # 每10秒减1
+        if state.fatigue_set_time > 0:
+            elapsed = time.time() - state.fatigue_set_time
+            decay = elapsed / 10
             state.fatigue = max(0.0, state.fatigue - decay)
-            state.engage_set_time = time.time()
+            state.fatigue_set_time = time.time()
         return state.fatigue
 
+    def get_buffer_threshold(self, group_id: int) -> int:
+        """
+        根据参与度返回需要缓冲多少条消息才触发回复。
+        曲线特征：
+          100→70: 从1升到4（刚进聊天，几乎立即回复）
+          70→40:  稳定在4（正常聊天节奏）
+          40→0:   慢慢从4升到10（逐渐不想聊了）
+        """
+        eng = self.get_current_engagement(group_id)
+        if eng <= 0:
+            return 999999
+        if eng >= 70:
+            return max(1, int(1 + (100 - eng) / 10))
+        elif eng >= 40:
+            return 4
+        else:
+            return min(10, int(4 + (40 - eng) * 6 / 40))
+
     # ============================================================
-    # 消息缓冲 + 评估
+    # 消息缓冲 
     # ============================================================
 
     async def buffer_message(self, event: GroupMessageEvent) -> Optional[List[BufferedMessage]]:
         """
-        缓冲消息。返回 None 表示已缓冲等待后续处理。
-        返回 list 表示需要立即处理（@-mention 触发）。
+        缓冲消息。
+        @-mention → 立即返回（含缓冲区里已有的消息）。
+        活跃期普通消息 → 加入缓冲区，达到阈值则返回全部。
+        非活跃期 → 丢弃，返回 None。
         """
         gid = event.group_id
         state = self._get_state(gid)
@@ -205,65 +216,29 @@ class Humanizer:
             images=event.images or [],
         )
 
-        # @-mention：立即处理，触发 3 分钟高活跃
+        # @-mention：立即处理，触发高活跃
         if event.is_at_bot:
-            self.trigger_active(gid, 3, 100)
-            if state.eval_task and not state.eval_task.done():
-                state.eval_task.cancel()
+            self.trigger_active(gid, 100)
             pending = state.buffer.copy()
             state.buffer.clear()
             pending.append(msg)
-            state.messages_since_eval = 0
-            state.last_eval_time = time.time()
             return pending
 
-        # 普通消息：加入缓冲区
+        # 非活跃期直接丢弃
+        if not self.is_active(gid):
+            return None
+
+        # 活跃期：加入缓冲区
         state.buffer.append(msg)
-        state.messages_since_eval += 1
 
-        # 检查随机出没状态
-        self._check_random_session(gid)
-
-        # 检查是否该评估了（10秒 或 3条消息）
-        if self._should_evaluate(state):
-            return await self._do_evaluate(gid, state)
-
-        # 安排定时评估
-        if state.eval_task is None or state.eval_task.done():
-            state.eval_task = asyncio.create_task(self._timed_eval(gid))
+        # 达到阈值 → 取出全部交给 LLM
+        threshold = self.get_buffer_threshold(gid)
+        if len(state.buffer) >= threshold:
+            messages = state.buffer.copy()
+            state.buffer.clear()
+            return messages
 
         return None
-
-    def _should_evaluate(self, state: GroupState) -> bool:
-        """是否应该立即评估缓冲区"""
-        if not state.buffer:
-            return False
-        if time.time() - state.last_eval_time >= ENGAGE_EVAL_INTERVAL:
-            return True
-        if state.messages_since_eval >= ENGAGE_EVAL_MSG_COUNT:
-            return True
-        return False
-
-    async def _do_evaluate(self, group_id: int, state: GroupState) -> List[BufferedMessage]:
-        """取出缓冲区消息用于评估"""
-        messages = state.buffer.copy()
-        state.buffer.clear()
-        state.messages_since_eval = 0
-        state.last_eval_time = time.time()
-        return messages
-
-    async def _timed_eval(self, group_id: int):
-        """定时评估：等待一段时间后触发 flush"""
-        try:
-            await asyncio.sleep(ENGAGE_EVAL_INTERVAL)
-        except asyncio.CancelledError:
-            return
-        state = self._get_state(group_id)
-        if state.buffer:
-            messages = await self._do_evaluate(group_id, state)
-            if self._on_flush and messages:
-                engagement = self.get_current_engagement(group_id)
-                await self._on_flush(group_id, messages, engagement)
 
     # ============================================================
     # 随机出没调度
@@ -275,50 +250,40 @@ class Humanizer:
         return 0 <= hour < 8
 
     def _get_session_params(self) -> tuple:
-        """
-        根据当前时间返回出没参数：
-        深夜：间隔短、活跃久、参与度高
-        白天：间隔长、活跃短、参与度低
-        """
+        """根据当前时间返回出没参数：(gap_min, gap_max, engagement)"""
         if self._is_night():
-            return (
-                NIGHT_GAP_MIN, NIGHT_GAP_MAX,
-                NIGHT_DURATION_MIN, NIGHT_DURATION_MAX,
-                NIGHT_ENGAGEMENT,
-            )
-        return (
-            DAY_GAP_MIN, DAY_GAP_MAX,
-            DAY_DURATION_MIN, DAY_DURATION_MAX,
-            DAY_ENGAGEMENT,
-        )
+            return NIGHT_GAP_MIN, NIGHT_GAP_MAX, NIGHT_ENGAGEMENT
+        return DAY_GAP_MIN, DAY_GAP_MAX, DAY_ENGAGEMENT
 
     def _schedule_next_session(self, state: GroupState):
         """安排下一次随机出没时间"""
-        gap_min, gap_max, _, _, _ = self._get_session_params()
+        gap_min, gap_max, _ = self._get_session_params()
         gap = random.randint(gap_min, gap_max)
         state.next_session_time = time.time() + gap * 60
         logger.debug("Next session in %d min", gap)
 
     def _check_random_session(self, group_id: int):
         """
-        检查随机出没状态：
-        1. 活跃期中 → 继续
-        2. 活跃期刚结束 → 清空缓冲、触发总结
-        3. 到了出没时间 → 开始新的出没
+        检查活跃状态（参与度 > 0 = 活跃）：
+        1. 参与度 > 0 → 活跃中
+        2. 参与度刚归零 → 清空缓冲、触发总结
+        3. 到了出没时间 → 设置参与度
         """
         state = self._get_state(group_id)
         now = time.time()
+        eng = self.get_current_engagement(group_id)
 
-        # 活跃期中
-        if state.session_active_until and now < state.session_active_until:
+        # 活跃中
+        if eng > 0:
             return True
 
-        # 活跃期刚结束
-        if state.session_active_until and now >= state.session_active_until:
-            state.session_active_until = None
+        # 参与度刚归零（疲惫值或回复计数 > 0 说明刚结束）
+        if state.fatigue > 0 or state.reply_count > 0:
             state.buffer.clear()
-            state.engagement = 0
-            state.messages_since_eval = 0
+            state.fatigue = 0
+            state.fatigue_set_time = 0
+            state.reply_count = 0
+            state.active_users.clear()
             self._schedule_next_session(state)
             logger.info("[Group %d] Session ended", group_id)
             if self._on_session_end:
@@ -327,16 +292,16 @@ class Humanizer:
 
         # 到了出没时间
         if state.next_session_time > 0 and now >= state.next_session_time:
-            _, _, dur_min, dur_max, engage = self._get_session_params()
-            duration = random.randint(dur_min, dur_max)
-            state.session_active_until = now + duration * 60
+            _, _, engage = self._get_session_params()
             state.engagement = engage
             state.engage_set_time = now
             state.fatigue = 0
+            state.fatigue_set_time = now
             state.reply_count = 0
             state.active_users.clear()
-            logger.info("[Group %d] Session started, %d min (engagement=%d)",
-                        group_id, duration, engage)
+            logger.info("[Group %d] Random session (engagement=%d)", group_id, engage)
+            if self._on_session_start:
+                asyncio.ensure_future(self._on_session_start(group_id))
             return True
 
         return False
@@ -356,22 +321,18 @@ class Humanizer:
         if group_id:
             eng = self.get_current_engagement(group_id)
             state = self._get_state(group_id)
-            buf_len = len(state.buffer)
             fat = state.fatigue
             night = " [深夜]" if self._is_night() else ""
-            if eng > 50:
-                return f"ACTIVE (engagement={eng:.0f}, fatigue={fat:.0f}, buffer={buf_len}){night}"
             if eng > 0:
-                return f"Cooling (engagement={eng:.0f}, fatigue={fat:.0f}, buffer={buf_len}){night}"
-            if state.session_active_until and time.time() < state.session_active_until:
-                return f"Random session (buffer={buf_len}){night}"
+                buf_len = len(state.buffer)
+                threshold = self.get_buffer_threshold(group_id)
+                decay_left = int(ENGAGE_DECAY_DURATION * eng / 100)
+                return f"ACTIVE (eng={eng:.0f}, fat={fat:.0f}, buf={buf_len}/{threshold}, ~{decay_left}s){night}"
             if state.next_session_time:
                 gap = int(state.next_session_time - time.time())
                 if gap > 0:
-                    return f"IDLE (next in {gap // 60}min, buffer={buf_len}){night}"
-                else:
-                    return f"IDLE (ready to start, buffer={buf_len}){night}"
-            return f"IDLE (buffer={buf_len}){night}"
+                    return f"IDLE (next in {gap // 60}m{gap % 60}s){night}"
+            return f"IDLE{night}"
         lines = []
         for gid in self._groups:
             lines.append(f"  Group {gid}: {self.get_session_status(gid)}")
