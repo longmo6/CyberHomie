@@ -15,3 +15,4 @@ def setup_logger(name: str = "cyberhomie") -> logging.Logger:
     handler.setFormatter(fmt)
     logger.addHandler(handler)
     return logger
+
