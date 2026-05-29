@@ -346,18 +346,21 @@ class Humanizer:
     def is_rejected(self, text: str) -> bool:
         """检查是否为 API 错误/风控信息"""
         if not text:
+            print("[Filter] Rejected: empty response")
             return True
         lower = text.lower()
         for pattern in REJECT_PATTERNS:
             if re.search(pattern, lower):
-                logger.warning("Rejected content: %s", text[:60])
+                print(f"[Filter] Rejected: {text[:60]}")
                 return True
         return False
 
     def post_process_reply(self, text: str) -> str:
-        """回复后处理：去除AI痕迹、加语气词、限省略号、截断"""
+        """回复后处理：去名字前缀、去AI痕迹、加语气词、限省略号、截断"""
         if not text:
             return text
+        # 去掉 LLM 模仿聊天历史格式加的名字前缀 [xxx]
+        text = re.sub(r"^\[[^\]]+\]\s*", "", text)
         for pattern in FORMAL_PATTERNS:
             text = re.sub(pattern, "", text)
         text = text.strip()
