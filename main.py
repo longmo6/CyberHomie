@@ -99,7 +99,7 @@ async def topic_loop():
 
                 # 开话题
                 group_file = build_group_context(gid)
-                history = await build_chat_history(gid, limit=10)
+                history = await build_chat_history(gid, limit=30)
                 group_ctx_list = await group_memory.get_important_memories(gid)
                 if group_file:
                     group_ctx_list.append(group_file)
@@ -184,7 +184,7 @@ async def build_user_context(user_id: int) -> str:
     return user_ctx
 
 
-async def build_chat_history(group_id: int, limit: int = 15) -> list[dict]:
+async def build_chat_history(group_id: int, limit: int = 50) -> list[dict]:
     raw_msgs = await group_memory.get_recent_messages(group_id, limit=limit)
     history = []
     for msg in raw_msgs:
@@ -409,7 +409,7 @@ async def handle_private_message(event: PrivateMessageEvent):
     await group_memory.save_message(0, event.user_id, event.nickname, event.raw_text)
 
     user_ctx = await build_user_context(event.user_id)
-    raw_msgs = await group_memory.get_recent_messages(0, limit=20)
+    raw_msgs = await group_memory.get_recent_messages(0, limit=50)
     chat_history = []
     for msg in raw_msgs:
         if msg["role"] == "assistant":

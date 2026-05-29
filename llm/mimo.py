@@ -37,14 +37,14 @@ class LLMClient:
         images: list[str] = None,
     ) -> str:
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(chat_history[-10:])
+        messages.extend(chat_history[-50:])
         messages.append({"role": "user", "content": self._build_content(user_message, images)})
 
         try:
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=512,
+                max_tokens=1024,
                 temperature=0.85,
                 top_p=0.9,
             )
