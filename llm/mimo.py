@@ -96,7 +96,6 @@ class LLMClient:
                 temperature=0.7,
                 response_format={"type": "json_object"},
             )
-            import json
             content = resp.choices[0].message.content
             return json.loads(content) if content else {}
         except Exception as e:

@@ -118,7 +118,6 @@ def _render_dashboard():
         else:
             lines.append(f"  Group {gid}")
             lines.append(f"    Status:  IDLE")
-        lines.append(f"    Followup:  {_followup_count.get(gid, 0)}/{_MAX_FOLLOWUPS_PER_SESSION}")
 
     # Private chat
     if _private_reply_count:
@@ -281,82 +280,6 @@ def build_group_context(group_id: int) -> str:
     return group_file_memory.load_for_prompt(group_id)
 
 
-# --- Flush callback: batch decision for buffered messages ---
-async def on_flush(group_id: int, messages: List[BufferedMessage], engagement: float):
-    """Called when humanizer flushes buffered messages."""
-    if not messages:
-        return
-
-    for msg in messages:
-        await group_memory.save_message(
-            group_id, msg.user_id, msg.nickname, msg.text
-        )
-        await user_memory.get_or_create_user(msg.user_id, msg.nickname)
-        await user_memory.increment_message_count(msg.user_id)
-
-    user_ctx = await build_user_context(messages[0].user_id)
-    group_ctx_list = await group_memory.get_important_memories(group_id)
-    group_file = build_group_context(group_id)
-    if group_file:
-        group_ctx_list.append(group_file)
-    history = await build_chat_history(group_id)
-
-    sys_prompt = personality.get_system_prompt(user_ctx, "\n".join(group_ctx_list))
-
-    fatigue = humanizer.get_fatigue(group_id)
-    if fatigue > 60:
-        sys_prompt += "\n\n你已经聊了一会儿了，有点累了。回复变短变敷衍，可以只回半句或表情。"
-    elif fatigue > 30:
-        sys_prompt += "\n\n你聊了一阵了，可以适当敷衍一些。"
-
-    buffered_data = [
-        {
-            "message_id": m.message_id,
-            "nickname": m.nickname,
-            "text": m.text,
-            "is_at_bot": m.is_at_bot,
-            "images": m.images,
-            "has_sticker": m.has_sticker,
-        }
-        for m in messages
-    ]
-
-    print(f"[LLM] Processing {len(messages)} messages (engagement={engagement:.0f}, fatigue={fatigue:.0f})")
-    replies = await llm_client.decide_replies(sys_prompt, history, buffered_data)
-
-    if not replies:
-        print("[LLM] No reply needed")
-
-    for reply in replies:
-        text = reply.get("text", "")
-        if not text:
-            continue
-        msg_id = reply.get("message_id", 0)
-        quote = reply.get("quote", False)
-
-        if personality.check_forbidden(text):
-            continue
-
-        text = humanizer.post_process_reply(text)
-        if humanizer.is_rejected(text):
-            continue
-        reply_to = msg_id if quote else 0
-
-        await typing_delay(text)
-        await send_group_split(group_id, text, reply_to=reply_to)
-        humanizer.notify_bot_replied(group_id)
-
-        await group_memory.save_message(
-            group_id, settings.bot_qq_id, personality.name, text, is_bot=True
-        )
-
-        for msg in messages:
-            if msg.message_id == msg_id:
-                await relationship.update_closeness(msg.user_id, 0.01)
-                humanizer.record_replied_user(group_id, msg.user_id)
-                break
-
-
 # --- App lifecycle ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -366,7 +289,6 @@ async def lifespan(app: FastAPI):
 
     humanizer.set_session_start_callback(on_session_start)
     humanizer.set_session_end_callback(on_session_end)
-    humanizer.set_flush_callback(on_flush)
 
     scheduler.start()
     logger.info("CyberHomie started")
@@ -417,6 +339,15 @@ async def handle_group_message(event: GroupMessageEvent):
     pending = await humanizer.buffer_message(event)
     if pending is None:
         return
+
+    # @-mention：先检查是否应该回复，再设置参与度
+    if event.is_at_bot:
+        if not humanizer.should_reply_to_at(event.group_id):
+            logger.info("[群%d] @ ignored (fatigue or no charges)", event.group_id)
+            return
+        # 沉默期被@：激活参与度；活跃期被@：不重置
+        if not humanizer.is_active(event.group_id):
+            humanizer.trigger_active(event.group_id, 100, force=True)
 
     for msg in pending:
         await group_memory.save_message(
@@ -470,7 +401,7 @@ async def handle_group_message(event: GroupMessageEvent):
 
         await typing_delay(text)
         await send_group_split(event.group_id, text, reply_to=reply_to)
-        humanizer.notify_bot_replied(event.group_id)
+        humanizer.notify_bot_replied(event.group_id, was_at=True)
 
         await group_memory.save_message(
             event.group_id, settings.bot_qq_id, personality.name, text, is_bot=True
@@ -745,7 +676,7 @@ async def handle_command(cmd: str):
     elif action == "engage":
         if len(parts) >= 3:
             gid, level = int(parts[1]), float(parts[2])
-            humanizer.trigger_active(gid, engagement=level)
+            humanizer.trigger_active(gid, engagement=level, force=True)
             print(f"Group {gid} engagement set to {level}")
         elif len(parts) >= 2:
             gid = int(parts[1])
@@ -758,7 +689,7 @@ async def handle_command(cmd: str):
         if len(parts) >= 3 and parts[1] == "start":
             gid = int(parts[2])
             minutes = int(parts[3]) if len(parts) >= 4 else 5
-            humanizer.trigger_active(gid, engagement=60)
+            humanizer.trigger_active(gid, engagement=60, force=True)
             print(f"Group {gid} active (engagement=60)")
         elif len(parts) >= 3 and parts[1] == "stop":
             gid = int(parts[2])
@@ -770,7 +701,7 @@ async def handle_command(cmd: str):
             # Default: first group
             gid = list(settings.group_ids)[0] if settings.group_ids else 0
             minutes = int(parts[2]) if len(parts) >= 3 else 5
-            humanizer.trigger_active(gid, engagement=60)
+            humanizer.trigger_active(gid, engagement=60, force=True)
             print(f"Group {gid} active (engagement=60)")
         elif len(parts) >= 2 and parts[1] == "stop":
             for gid in settings.group_ids:

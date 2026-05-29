@@ -87,6 +87,9 @@ class GroupState:
     fatigue: float = 0.0              # 疲惫值 0-100，越高越敷衍
     fatigue_set_time: float = 0.0     # 疲惫值设定时间（独立衰减）
     reply_count: int = 0              # 本轮已回复次数
+    at_count: int = 0                 # 连续被@次数（session内）
+    at_charges: int = 2              # 沉默期@回复机会（上限2，每15分钟恢复1）
+    at_last_recharge: float = 0.0    # 上次恢复时间
     active_users: set = field(default_factory=set)  # 本轮被回复过的用户ID
 
 
@@ -104,7 +107,6 @@ class Humanizer:
         # 回调函数
         self._on_session_start: Optional[Callable[[int], Awaitable[None]]] = None
         self._on_session_end: Optional[Callable[[int], Awaitable[None]]] = None
-        self._on_flush: Optional[Callable[[int, List[BufferedMessage], float], Awaitable[None]]] = None
 
     def _get_state(self, group_id: int) -> GroupState:
         """获取或创建群状态"""
@@ -120,16 +122,15 @@ class Humanizer:
     def set_session_end_callback(self, cb: Callable[[int], Awaitable[None]]):
         self._on_session_end = cb
 
-    def set_flush_callback(self, cb: Callable[[int, List[BufferedMessage], float], Awaitable[None]]):
-        self._on_flush = cb
-
     # ============================================================
     # 参与度管理
     # ============================================================
 
-    def trigger_active(self, group_id: int, engagement: float = 100):
-        """设置参与度（@-mention / 随机出没）"""
+    def trigger_active(self, group_id: int, engagement: float = 100, force: bool = False):
+        """设置参与度。force=True 时强制重置（随机出没），否则只在空闲时设置（@-mention）。"""
         state = self._get_state(group_id)
+        if not force and self.is_active(group_id):
+            return  # 活跃状态下不再重置参与度
         state.engagement = engagement
         state.engage_set_time = time.time()
         logger.info("[Group %d] Engagement set to %.0f", group_id, engagement)
@@ -147,12 +148,54 @@ class Humanizer:
         decay = elapsed / ENGAGE_DECAY_DURATION * 100
         return max(0.0, state.engagement - decay)
 
-    def notify_bot_replied(self, group_id: int):
+    def notify_bot_replied(self, group_id: int, was_at: bool = False):
         """bot 回复后累积疲惫值。"""
         state = self._get_state(group_id)
         state.reply_count += 1
         state.fatigue = min(100, state.fatigue + 5 + state.reply_count)
         state.fatigue_set_time = time.time()
+        if was_at:
+            state.at_count += 1
+
+    def should_reply_to_at(self, group_id: int) -> bool:
+        """判断是否回复 @-mention。
+        活跃期：连续 @ 次数越多，忽略概率越高。
+        沉默期：实时充能系统，上限2，每15分钟恢复1。
+        """
+        state = self._get_state(group_id)
+        now = time.time()
+
+        # 活跃期：@疲劳概率
+        if self.is_active(group_id):
+            at = state.at_count
+            if at <= 5:
+                return True
+            elif at <= 10:
+                return random.random() < 0.8
+            elif at <= 15:
+                return random.random() < 0.5
+            else:
+                return random.random() < 0.3
+
+        # 沉默期：先恢复充能
+        if state.at_last_recharge > 0:
+            elapsed = now - state.at_last_recharge
+            gained = int(elapsed / 900)  # 每15分钟恢复1
+            if gained > 0:
+                state.at_charges = min(2, state.at_charges + gained)
+                state.at_last_recharge = now
+        else:
+            state.at_last_recharge = now
+
+        if state.at_charges <= 0:
+            logger.info("[Group %d] @ no charges left (0/2)", group_id)
+            return False
+
+        # 消耗1次
+        state.at_charges -= 1
+        state.at_last_recharge = now
+        logger.info("[Group %d] @ reply (%d/2 charges left)", group_id, state.at_charges)
+        return True
 
     def record_replied_user(self, group_id: int, user_id: int):
         """记录本轮被bot回复过的用户（只有真正互动过的人）"""
@@ -218,9 +261,8 @@ class Humanizer:
             has_sticker=event.has_sticker,
         )
 
-        # @-mention：立即处理，触发高活跃
+        # @-mention：立即返回（参与度由调用方设置）
         if event.is_at_bot:
-            self.trigger_active(gid, 100)
             pending = state.buffer.copy()
             state.buffer.clear()
             pending.append(msg)
@@ -279,17 +321,22 @@ class Humanizer:
         if eng > 0:
             return True
 
-        # 参与度刚归零（疲惫值或回复计数 > 0 说明刚结束）
-        if state.fatigue > 0 or state.reply_count > 0:
+        # 参与度刚归零（session 启动时 next_session_time 被清零，用此判断是否刚结束）
+        if state.next_session_time == 0:
+            # session 结束：清空状态，安排下次出没
+            if state.reply_count > 0 or state.fatigue > 0:
+                if self._on_session_end:
+                    asyncio.ensure_future(self._on_session_end(group_id))
             state.buffer.clear()
             state.fatigue = 0
             state.fatigue_set_time = 0
             state.reply_count = 0
+            state.at_count = 0
+            state.at_charges = 2
+            state.at_last_recharge = 0
             state.active_users.clear()
             self._schedule_next_session(state)
             logger.info("[Group %d] Session ended", group_id)
-            if self._on_session_end:
-                asyncio.ensure_future(self._on_session_end(group_id))
             return False
 
         # 到了出没时间
@@ -300,6 +347,10 @@ class Humanizer:
             state.fatigue = 0
             state.fatigue_set_time = now
             state.reply_count = 0
+            state.at_count = 0
+            state.at_charges = 2
+            state.next_session_time = 0  # 清零，用于标记 session 进行中
+            state.at_last_recharge = 0
             state.active_users.clear()
             logger.info("[Group %d] Random session (engagement=%d)", group_id, engage)
             if self._on_session_start:
@@ -307,13 +358,6 @@ class Humanizer:
             return True
 
         return False
-
-    def _is_active_hour(self) -> bool:
-        """是否在配置的活跃时段内"""
-        hour = datetime.now().hour
-        if self.active_hour_start <= self.active_hour_end:
-            return self.active_hour_start <= hour < self.active_hour_end
-        return hour >= self.active_hour_start or hour < self.active_hour_end
 
     # ============================================================
     # 状态查询 + 后处理
