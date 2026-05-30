@@ -49,6 +49,7 @@ loop: Optional[asyncio.AbstractEventLoop] = None
 
 # --- Per-group message timestamps ---
 _last_group_msg_time: Dict[int, float] = {}
+_last_human_msg_time: Dict[int, float] = {}  # 仅记录人类消息时间
 
 
 # --- Session end callback ---
@@ -61,6 +62,8 @@ async def on_session_end(group_id: int):
         row = await db.fetchone("SELECT nickname FROM users WHERE qq_id = ?", (uid,))
         if row:
             await user_file_memory.summarize_and_save(uid, row[0])
+        else:
+            print(f"[Memory] user {uid}: not found in DB, skip")
     await group_file_memory.summarize_and_save(group_id)
     print("[Memory] Done.\n")
 
@@ -162,29 +165,37 @@ _PRIVATE_COOLDOWN = 1800   # 停止后冷却30分钟
 
 
 async def on_session_start(group_id: int):
-    """随机出没启动时，根据最后一条消息决定是否开话题。"""
-    # 检查最后一条消息
-    last_msgs = await group_memory.get_recent_messages(group_id, limit=1)
-    if last_msgs and last_msgs[0].get("role") == "assistant":
-        logger.info("[Group %d] Session started, last msg is bot's, skip topic", group_id)
-        return  # bot 自己发的，不开话题（防止深夜自言自语）
-
-    last_msg_time = _last_group_msg_time.get(group_id, 0)
-    if last_msg_time > 0 and time.time() - last_msg_time < 300:
-        logger.info("[Group %d] Session started, recent chat detected, joining via buffer", group_id)
-        return  # 有人在聊（<5分钟），通过缓冲区参与，不开话题
-
-    # 安静超过 5 分钟，开话题
+    """随机出没启动时，根据最后一条人类消息决定是插话还是开话题。"""
     group_file = build_group_context(group_id)
-    history = await build_chat_history(group_id, limit=30)
     group_ctx_list = await group_memory.get_important_memories(group_id)
     if group_file:
         group_ctx_list.append(group_file)
+    sys_prompt = personality.get_system_prompt("", "\n".join(group_ctx_list))
 
-    topic = await llm_client.generate_topic(
-        personality.get_system_prompt("", "\n".join(group_ctx_list)),
-        history,
-    )
+    # 检查最近 2 分钟是否有人类活动
+    last_msg_time = _last_human_msg_time.get(group_id, 0)
+    recent_active = last_msg_time > 0 and time.time() - last_msg_time < 120
+
+    if recent_active:
+        # 群里正在聊天，根据历史记录插一句话
+        recent = await group_memory.get_recent_messages(group_id, limit=10)
+        recent = [m for m in recent if m.get("role") != "assistant"]
+        text = await llm_client.generate_join_reply(sys_prompt, recent)
+        if text and not personality.check_forbidden(text):
+            text = humanizer.post_process_reply(text)
+            if not humanizer.is_rejected(text):
+                await typing_delay(text)
+                await api_client.send_group_message(group_id, text)
+                humanizer.notify_bot_replied(group_id)
+                logger.info("[Bot][群%d][插话] -> %s", group_id, text[:60])
+                await group_memory.save_message(
+                    group_id, settings.bot_qq_id, personality.name, text, is_bot=True
+                )
+        return
+
+    # 安静超过 2 分钟，开话题
+    history = await build_chat_history(group_id, limit=30)
+    topic = await llm_client.generate_topic(sys_prompt, history)
     if not topic or personality.check_forbidden(topic):
         return
 
@@ -333,6 +344,7 @@ app = FastAPI(title="CyberHomie", lifespan=lifespan)
 # --- Group message handler ---
 async def handle_group_message(event: GroupMessageEvent):
     _last_group_msg_time[event.group_id] = time.time()
+    _last_human_msg_time[event.group_id] = time.time()
     logger.info("[群%d][%s] %s (at=%s)", event.group_id, event.nickname, event.raw_text[:60], event.is_at_bot)
     recent_messages.append(event)
 

@@ -217,5 +217,47 @@ class LLMClient:
             logger.error("generate_topic failed: %s", e)
             return ""
 
+    async def generate_join_reply(
+        self, system_prompt: str, recent_history: list[dict]
+    ) -> str:
+        """Generate a reply to join an ongoing conversation."""
+        history_text = ""
+        for msg in recent_history[-8:]:
+            nickname = msg.get("nickname", "???")
+            content = msg.get("content", "")
+            history_text += f"{nickname}: {content}\n"
+
+        prompt = (
+            "群里正在聊天，你想插句话参与进去。\n"
+            "根据最近的聊天内容，自然地接一句话融入对话。\n"
+            "要求：\n"
+            "- 像群友随意插嘴一样自然\n"
+            "- 对刚才聊的内容发表看法、吐槽、补充、提问都行\n"
+            "- 一句话就行，不要太长\n"
+            "- 不要重复别人说过的话\n"
+            "- 不要太正式，口语化\n\n"
+        )
+        if history_text:
+            prompt += f"最近的聊天：\n{history_text}\n\n"
+        prompt += "你现在想说什么？直接说，不要任何前缀。"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+        try:
+            resp = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=100,
+                temperature=0.9,
+            )
+            content = resp.choices[0].message.content
+            return content.strip() if content else ""
+        except Exception as e:
+            logger.error("generate_join_reply failed: %s", e)
+            return ""
+
     async def close(self):
         await self.client.close()

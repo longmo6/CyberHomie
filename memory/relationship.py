@@ -41,6 +41,7 @@ class RelationshipGraph:
             (new_score, user_id),
         )
         await self.db.commit()
+        print(f"[Relationship] user {user_id}: {row[0]:.2f} -> {new_score:.2f}")
 
     async def get_user_relationship(
         self, user_a: int, user_b: int

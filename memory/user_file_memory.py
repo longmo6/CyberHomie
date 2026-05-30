@@ -102,6 +102,7 @@ class UserFileMemory:
             (qq_id,),
         )
         if len(rows) < 1:
+            print(f"[Memory] {nickname} ({qq_id}): not enough messages, skip")
             return
 
         messages_text = ""

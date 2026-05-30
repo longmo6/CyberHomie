@@ -93,6 +93,7 @@ class GroupFileMemory:
             (group_id,),
         )
         if len(rows) < 10:
+            print(f"[Memory] Group {group_id}: only {len(rows)} msgs (< 10), skip")
             return
 
         messages_text = ""
