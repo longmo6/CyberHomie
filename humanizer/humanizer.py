@@ -20,6 +20,7 @@ from typing import Callable, Awaitable, Optional, List, Dict
 
 from config import Settings
 from core.event_handler import GroupMessageEvent
+from llm.mimo import ConversationSession
 from utils.logger import setup_logger
 
 logger = setup_logger("humanizer")
@@ -91,6 +92,7 @@ class GroupState:
     at_charges: int = 2              # 沉默期@回复机会（上限2，每15分钟恢复1）
     at_last_recharge: float = 0.0    # 上次恢复时间
     active_users: set = field(default_factory=set)  # 本轮被回复过的用户ID
+    session: Optional[ConversationSession] = None  # session 内滚动对话窗口
 
 
 class Humanizer:
@@ -335,6 +337,8 @@ class Humanizer:
             state.at_charges = 2
             state.at_last_recharge = 0
             state.active_users.clear()
+            if state.session:
+                state.session.clear()
             self._schedule_next_session(state)
             logger.info("[Group %d] Session ended", group_id)
             return False
@@ -352,6 +356,7 @@ class Humanizer:
             state.next_session_time = 0  # 清零，用于标记 session 进行中
             state.at_last_recharge = 0
             state.active_users.clear()
+            state.session = ConversationSession()
             logger.info("[Group %d] Random session (engagement=%d)", group_id, engage)
             if self._on_session_start:
                 asyncio.ensure_future(self._on_session_start(group_id))
@@ -374,6 +379,7 @@ class Humanizer:
         state.next_session_time = 0
         state.at_last_recharge = 0
         state.active_users.clear()
+        state.session = ConversationSession()
         logger.info("[Group %d] Forced session (engagement=%d)", group_id, engage)
         if self._on_session_start:
             await self._on_session_start(group_id)

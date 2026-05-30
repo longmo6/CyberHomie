@@ -172,15 +172,19 @@ async def on_session_start(group_id: int):
         group_ctx_list.append(group_file)
     sys_prompt = personality.get_system_prompt("", "\n".join(group_ctx_list))
 
+    # session 窗口（刚创建时为空，回退到 DB 历史）
+    state = humanizer._get_state(group_id)
+    session_msgs = state.session.get_messages() if state.session else []
+    if not session_msgs:
+        session_msgs = await build_chat_history(group_id, limit=30)
+
     # 检查最近 2 分钟是否有人类活动
     last_msg_time = _last_human_msg_time.get(group_id, 0)
     recent_active = last_msg_time > 0 and time.time() - last_msg_time < 120
 
     if recent_active:
         # 群里正在聊天，根据历史记录插一句话
-        recent = await group_memory.get_recent_messages(group_id, limit=10)
-        recent = [m for m in recent if m.get("role") != "assistant"]
-        text = await llm_client.generate_join_reply(sys_prompt, recent)
+        text = await llm_client.generate_join_reply(sys_prompt, session_msgs)
         if not text:
             print(f"[Bot][群{group_id}] join_reply: LLM returned empty")
         elif personality.check_forbidden(text):
@@ -194,14 +198,15 @@ async def on_session_start(group_id: int):
                 await api_client.send_group_message(group_id, text)
                 humanizer.notify_bot_replied(group_id)
                 logger.info("[Bot][群%d][插话] -> %s", group_id, text[:60])
+                if state.session:
+                    state.session.add_message("assistant", f'[小夜] {text}')
                 await group_memory.save_message(
                     group_id, settings.bot_qq_id, personality.name, text, is_bot=True
                 )
         return
 
     # 安静超过 2 分钟，开话题
-    history = await build_chat_history(group_id, limit=30)
-    topic = await llm_client.generate_topic(sys_prompt, history)
+    topic = await llm_client.generate_topic(sys_prompt, session_msgs)
     if not topic:
         print(f"[Bot][群{group_id}] generate_topic: LLM returned empty")
         return
@@ -217,6 +222,8 @@ async def on_session_start(group_id: int):
     await api_client.send_group_message(group_id, topic)
     humanizer.notify_bot_replied(group_id)
     logger.info("[Bot][群%d][主动] -> %s", group_id, topic[:60])
+    if state.session:
+        state.session.add_message("assistant", f'[小夜] {topic}')
     await group_memory.save_message(
         group_id, settings.bot_qq_id, personality.name, topic, is_bot=True
     )
@@ -359,6 +366,11 @@ async def handle_group_message(event: GroupMessageEvent):
     logger.info("[群%d][%s] %s (at=%s)", event.group_id, event.nickname, event.raw_text[:60], event.is_at_bot)
     recent_messages.append(event)
 
+    # 录入 session 滚动窗口
+    state = humanizer._get_state(event.group_id)
+    if state.session and humanizer.is_active(event.group_id):
+        state.session.add_message("user", f'[{event.nickname}] {event.raw_text}')
+
     pending = await humanizer.buffer_message(event)
     if pending is None:
         return
@@ -384,7 +396,11 @@ async def handle_group_message(event: GroupMessageEvent):
     group_file = build_group_context(event.group_id)
     if group_file:
         group_ctx_list.append(group_file)
-    history = await build_chat_history(event.group_id)
+
+    # 优先用 session 窗口，否则从 DB 取
+    session_msgs = state.session.get_messages() if state.session else []
+    if not session_msgs:
+        session_msgs = await build_chat_history(event.group_id)
 
     sys_prompt = personality.get_system_prompt(user_ctx, "\n".join(group_ctx_list))
 
@@ -402,7 +418,7 @@ async def handle_group_message(event: GroupMessageEvent):
     ]
 
     print(f"[LLM] Processing {len(pending)} messages (@-mention)")
-    replies = await llm_client.decide_replies(sys_prompt, history, buffered_data)
+    replies = await llm_client.decide_replies(sys_prompt, session_msgs, buffered_data)
 
     if not replies:
         print("[LLM] No reply needed")
@@ -425,6 +441,10 @@ async def handle_group_message(event: GroupMessageEvent):
         await typing_delay(text)
         await send_group_split(event.group_id, text, reply_to=reply_to)
         humanizer.notify_bot_replied(event.group_id, was_at=True)
+
+        # 录入 session
+        if state.session:
+            state.session.add_message("assistant", f'[小夜] {text}')
 
         await group_memory.save_message(
             event.group_id, settings.bot_qq_id, personality.name, text, is_bot=True

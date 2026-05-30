@@ -10,6 +10,30 @@ from utils.logger import setup_logger
 logger = setup_logger("llm")
 
 
+class ConversationSession:
+    """Session-scoped rolling conversation window."""
+
+    def __init__(self, max_messages: int = 100):
+        self.messages: list[dict] = []
+        self.max_messages = max_messages
+
+    def add_message(self, role: str, content: str):
+        self.messages.append({"role": role, "content": content})
+        if len(self.messages) > self.max_messages:
+            self.messages = self.messages[-self.max_messages:]
+
+    def get_messages(self, limit: int = None) -> list[dict]:
+        if limit:
+            return self.messages[-limit:]
+        return self.messages
+
+    def clear(self):
+        self.messages.clear()
+
+    def __len__(self):
+        return len(self.messages)
+
+
 class LLMClient:
     def __init__(self, settings: Settings):
         self.client = AsyncOpenAI(
@@ -102,7 +126,7 @@ class LLMClient:
     async def decide_replies(
         self,
         system_prompt: str,
-        messages: list[dict],
+        session_messages: list[dict],
         buffered: list[dict],
     ) -> list[dict]:
         """
@@ -149,7 +173,7 @@ class LLMClient:
         )
 
         messages_for_llm = [{"role": "system", "content": system_prompt}]
-        messages_for_llm.extend(messages[-10:])
+        messages_for_llm.extend(session_messages[-30:])
         messages_for_llm.append({
             "role": "user",
             "content": self._build_content(prompt, all_images if all_images else None),
@@ -175,13 +199,9 @@ class LLMClient:
             return []
 
     async def generate_topic(
-        self, system_prompt: str, recent_history: list[dict]
+        self, system_prompt: str, session_messages: list[dict]
     ) -> str:
         """Generate a proactive conversation topic when chat has been quiet."""
-        history_text = ""
-        for msg in recent_history[-5:]:
-            history_text += f"{msg.get('content', '')}\n"
-
         prompt = (
             "群聊已经安静了一会儿。你想找个话题聊聊天。\n"
             "根据之前的聊天内容和你对群的了解，随便说点什么开启话题。\n"
@@ -190,20 +210,17 @@ class LLMClient:
             '- 不要太正式，不要"大家好"这种\n'
             "- 可以分享个有趣的事、问个问题、吐槽点什么\n"
             "- 一句话就行，不要长篇大论\n\n"
+            "你现在想说什么？直接说，不要任何前缀。"
         )
-        if history_text:
-            prompt += f"之前的聊天：\n{history_text}\n\n"
-        prompt += "你现在想说什么？直接说，不要任何前缀。"
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ]
+        messages_for_llm = [{"role": "system", "content": system_prompt}]
+        messages_for_llm.extend(session_messages[-10:])
+        messages_for_llm.append({"role": "user", "content": prompt})
 
         try:
             resp = await self.client.chat.completions.create(
                 model=self.model,
-                messages=messages,
+                messages=messages_for_llm,
                 temperature=0.9,
             )
             choice = resp.choices[0]
@@ -223,15 +240,9 @@ class LLMClient:
             return ""
 
     async def generate_join_reply(
-        self, system_prompt: str, recent_history: list[dict]
+        self, system_prompt: str, session_messages: list[dict]
     ) -> str:
         """Generate a reply to join an ongoing conversation."""
-        history_text = ""
-        for msg in recent_history[-8:]:
-            nickname = msg.get("nickname", "???")
-            content = msg.get("content", "")
-            history_text += f"{nickname}: {content}\n"
-
         prompt = (
             "群里正在聊天，你想插句话参与进去。\n"
             "根据最近的聊天内容，自然地接一句话融入对话。\n"
@@ -241,20 +252,17 @@ class LLMClient:
             "- 一句话就行，不要太长\n"
             "- 不要重复别人说过的话\n"
             "- 不要太正式，口语化\n\n"
+            "你现在想说什么？直接说，不要任何前缀。"
         )
-        if history_text:
-            prompt += f"最近的聊天：\n{history_text}\n\n"
-        prompt += "你现在想说什么？直接说，不要任何前缀。"
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ]
+        messages_for_llm = [{"role": "system", "content": system_prompt}]
+        messages_for_llm.extend(session_messages[-15:])
+        messages_for_llm.append({"role": "user", "content": prompt})
 
         try:
             resp = await self.client.chat.completions.create(
                 model=self.model,
-                messages=messages,
+                messages=messages_for_llm,
                 temperature=0.9,
             )
             choice = resp.choices[0]
