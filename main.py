@@ -181,9 +181,15 @@ async def on_session_start(group_id: int):
         recent = await group_memory.get_recent_messages(group_id, limit=10)
         recent = [m for m in recent if m.get("role") != "assistant"]
         text = await llm_client.generate_join_reply(sys_prompt, recent)
-        if text and not personality.check_forbidden(text):
+        if not text:
+            print(f"[Bot][群{group_id}] join_reply: LLM returned empty")
+        elif personality.check_forbidden(text):
+            print(f"[Bot][群{group_id}] join_reply: forbidden pattern -> {text[:40]}")
+        else:
             text = humanizer.post_process_reply(text)
-            if not humanizer.is_rejected(text):
+            if humanizer.is_rejected(text):
+                print(f"[Bot][群{group_id}] join_reply: rejected -> {text[:40]}")
+            else:
                 await typing_delay(text)
                 await api_client.send_group_message(group_id, text)
                 humanizer.notify_bot_replied(group_id)
@@ -196,11 +202,16 @@ async def on_session_start(group_id: int):
     # 安静超过 2 分钟，开话题
     history = await build_chat_history(group_id, limit=30)
     topic = await llm_client.generate_topic(sys_prompt, history)
-    if not topic or personality.check_forbidden(topic):
+    if not topic:
+        print(f"[Bot][群{group_id}] generate_topic: LLM returned empty")
+        return
+    if personality.check_forbidden(topic):
+        print(f"[Bot][群{group_id}] generate_topic: forbidden pattern -> {topic[:40]}")
         return
 
     topic = humanizer.post_process_reply(topic)
     if humanizer.is_rejected(topic):
+        print(f"[Bot][群{group_id}] generate_topic: rejected -> {topic[:40]}")
         return
     await typing_delay(topic)
     await api_client.send_group_message(group_id, topic)
@@ -530,6 +541,7 @@ async def handle_command(cmd: str):
         print("""
   status                      查看所有群状态
   engage <群号> [0-100]        查看/设置参与度
+  wake <群号>                 跳过冷却，立即随机出没
   say [群号] <消息>            以bot身份发群消息
   summarize                   总结所有用户+群记忆
   summarize <qq_id>           总结指定用户
@@ -600,6 +612,17 @@ async def handle_command(cmd: str):
         else:
             for gid in settings.group_ids:
                 print(f"  Group {gid}: {humanizer.get_current_engagement(gid):.0f}")
+
+    elif action == "wake":
+        if len(parts) >= 2:
+            gid = int(parts[1])
+            if gid in settings.group_ids:
+                await humanizer.force_session(gid)
+                print(f"[Wake] Group {gid} -> forced session")
+            else:
+                print(f"Group {gid} not in configured groups: {settings.group_ids}")
+        else:
+            print("Usage: wake <群号>")
 
     elif action == "debug":
         global _debug_mode

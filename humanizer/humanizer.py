@@ -359,6 +359,25 @@ class Humanizer:
 
         return False
 
+    async def force_session(self, group_id: int):
+        """强制进入随机出没状态，跳过冷却。"""
+        state = self._get_state(group_id)
+        now = time.time()
+        _, _, engage = self._get_session_params()
+        state.engagement = engage
+        state.engage_set_time = now
+        state.fatigue = 0
+        state.fatigue_set_time = now
+        state.reply_count = 0
+        state.at_count = 0
+        state.at_charges = 2
+        state.next_session_time = 0
+        state.at_last_recharge = 0
+        state.active_users.clear()
+        logger.info("[Group %d] Forced session (engagement=%d)", group_id, engage)
+        if self._on_session_start:
+            await self._on_session_start(group_id)
+
     # ============================================================
     # 状态查询 + 后处理
     # ============================================================

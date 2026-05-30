@@ -44,7 +44,6 @@ class LLMClient:
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=1024,
                 temperature=0.85,
                 top_p=0.9,
             )
@@ -68,7 +67,6 @@ class LLMClient:
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1024,
                 temperature=0.7,
             )
             content = resp.choices[0].message.content
@@ -92,7 +90,6 @@ class LLMClient:
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1024,
                 temperature=0.7,
                 response_format={"type": "json_object"},
             )
@@ -162,7 +159,6 @@ class LLMClient:
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages_for_llm,
-                max_tokens=500,
                 temperature=0.85,
                 top_p=0.9,
                 response_format={"type": "json_object"},
@@ -208,13 +204,22 @@ class LLMClient:
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=100,
                 temperature=0.9,
             )
-            content = resp.choices[0].message.content
-            return content.strip() if content else ""
+            choice = resp.choices[0]
+            content = choice.message.content
+            usage = getattr(resp, "usage", None)
+            if usage:
+                print(f"[LLM] generate_topic: prompt_tokens={usage.prompt_tokens}, completion_tokens={usage.completion_tokens}, total_tokens={usage.total_tokens}")
+            if not content:
+                reason = getattr(choice, "finish_reason", "unknown")
+                refusal = getattr(choice.message, "refusal", None)
+                print(f"[LLM] generate_topic: content=None, finish_reason={reason}, refusal={refusal}")
+                return ""
+            return content.strip()
         except Exception as e:
             logger.error("generate_topic failed: %s", e)
+            print(f"[LLM] generate_topic error: {e}")
             return ""
 
     async def generate_join_reply(
@@ -250,13 +255,22 @@ class LLMClient:
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=100,
                 temperature=0.9,
             )
-            content = resp.choices[0].message.content
-            return content.strip() if content else ""
+            choice = resp.choices[0]
+            content = choice.message.content
+            usage = getattr(resp, "usage", None)
+            if usage:
+                print(f"[LLM] generate_join_reply: prompt_tokens={usage.prompt_tokens}, completion_tokens={usage.completion_tokens}, total_tokens={usage.total_tokens}")
+            if not content:
+                reason = getattr(choice, "finish_reason", "unknown")
+                refusal = getattr(choice.message, "refusal", None)
+                print(f"[LLM] generate_join_reply: content=None, finish_reason={reason}, refusal={refusal}")
+                return ""
+            return content.strip()
         except Exception as e:
             logger.error("generate_join_reply failed: %s", e)
+            print(f"[LLM] generate_join_reply error: {e}")
             return ""
 
     async def close(self):
