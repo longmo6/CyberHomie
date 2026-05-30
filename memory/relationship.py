@@ -36,12 +36,13 @@ class RelationshipGraph:
             return
 
         new_score = max(0.0, min(1.0, row[0] + delta))
-        await self.db.execute(
-            "UPDATE users SET closeness_score = ? WHERE qq_id = ?",
-            (new_score, user_id),
-        )
-        await self.db.commit()
-        print(f"[Relationship] user {user_id}: {row[0]:.2f} -> {new_score:.2f}")
+        if new_score != row[0]:
+            await self.db.execute(
+                "UPDATE users SET closeness_score = ? WHERE qq_id = ?",
+                (new_score, user_id),
+            )
+            await self.db.commit()
+            print(f"[Relationship] user {user_id}: {row[0]:.2f} -> {new_score:.2f}")
 
     async def get_user_relationship(
         self, user_a: int, user_b: int
