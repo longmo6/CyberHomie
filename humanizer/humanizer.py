@@ -63,6 +63,9 @@ DAY_GAP_MIN = 40               # 出没间隔最小（分钟）
 DAY_GAP_MAX = 90               # 出没间隔最大（分钟）
 DAY_ENGAGEMENT = 30            # 出没时初始参与度
 
+# --- 保底回复间隔（秒）---
+GUARANTEED_REPLY_INTERVAL = 40.0
+
 
 @dataclass
 class BufferedMessage:
@@ -93,6 +96,7 @@ class GroupState:
     at_last_recharge: float = 0.0    # 上次恢复时间
     active_users: set = field(default_factory=set)  # 本轮被回复过的用户ID
     session: Optional[ConversationSession] = None  # session 内滚动对话窗口
+    last_reply_time: float = 0.0    # 上次回复时间戳（用于保底回复）
 
 
 class Humanizer:
@@ -156,6 +160,7 @@ class Humanizer:
         state.reply_count += 1
         state.fatigue = min(100, state.fatigue + 5 + state.reply_count)
         state.fatigue_set_time = time.time()
+        state.last_reply_time = time.time()
         if was_at:
             state.at_count += 1
 
@@ -284,6 +289,14 @@ class Humanizer:
             state.buffer.clear()
             return messages
 
+        # 保底回复：缓冲区有消息 + 距上次回复超过 40 秒 → 强制刷新
+        if state.buffer and state.last_reply_time > 0:
+            elapsed = time.time() - state.last_reply_time
+            if elapsed >= GUARANTEED_REPLY_INTERVAL:
+                messages = state.buffer.copy()
+                state.buffer.clear()
+                return messages
+
         return None
 
     # ============================================================
@@ -337,6 +350,7 @@ class Humanizer:
             state.at_charges = 2
             state.at_last_recharge = 0
             state.active_users.clear()
+            state.last_reply_time = 0
             if state.session:
                 state.session.clear()
             self._schedule_next_session(state)
@@ -357,6 +371,7 @@ class Humanizer:
             state.at_last_recharge = 0
             state.active_users.clear()
             state.session = ConversationSession()
+            state.last_reply_time = now
             logger.info("[Group %d] Random session (engagement=%d)", group_id, engage)
             if self._on_session_start:
                 asyncio.ensure_future(self._on_session_start(group_id))
@@ -380,6 +395,7 @@ class Humanizer:
         state.at_last_recharge = 0
         state.active_users.clear()
         state.session = ConversationSession()
+        state.last_reply_time = now
         logger.info("[Group %d] Forced session (engagement=%d)", group_id, engage)
         if self._on_session_start:
             await self._on_session_start(group_id)

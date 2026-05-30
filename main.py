@@ -50,6 +50,7 @@ loop: Optional[asyncio.AbstractEventLoop] = None
 # --- Per-group message timestamps ---
 _last_group_msg_time: Dict[int, float] = {}
 _last_human_msg_time: Dict[int, float] = {}  # 仅记录人类消息时间
+_last_bot_msg_time: Dict[int, float] = {}    # 仅记录 bot 消息时间
 
 
 # --- Session end callback ---
@@ -182,6 +183,12 @@ async def on_session_start(group_id: int):
     last_msg_time = _last_human_msg_time.get(group_id, 0)
     recent_active = last_msg_time > 0 and time.time() - last_msg_time < 120
 
+    # 如果 bot 发言后没人接话，跳过（防止自言自语）
+    bot_last = _last_bot_msg_time.get(group_id, 0)
+    if not recent_active and bot_last > last_msg_time:
+        logger.info("[Group %d] Session start skipped: no reply after bot's last msg", group_id)
+        return
+
     if recent_active:
         # 群里正在聊天，根据历史记录插一句话
         text = await llm_client.generate_join_reply(sys_prompt, session_msgs)
@@ -196,6 +203,7 @@ async def on_session_start(group_id: int):
             else:
                 await typing_delay(text)
                 await api_client.send_group_message(group_id, text)
+                _last_bot_msg_time[group_id] = time.time()
                 humanizer.notify_bot_replied(group_id)
                 logger.info("[Bot][群%d][插话] -> %s", group_id, text[:60])
                 if state.session:
@@ -220,6 +228,7 @@ async def on_session_start(group_id: int):
         return
     await typing_delay(topic)
     await api_client.send_group_message(group_id, topic)
+    _last_bot_msg_time[group_id] = time.time()
     humanizer.notify_bot_replied(group_id)
     logger.info("[Bot][群%d][主动] -> %s", group_id, topic[:60])
     if state.session:
@@ -380,9 +389,15 @@ async def handle_group_message(event: GroupMessageEvent):
         if not humanizer.should_reply_to_at(event.group_id):
             logger.info("[群%d] @ ignored (fatigue or no charges)", event.group_id)
             return
-        # 沉默期被@：激活参与度；活跃期被@：不重置
+        # 沉默期被@：激活参与度 + 创建 session；活跃期被@：不重置
         if not humanizer.is_active(event.group_id):
             humanizer.trigger_active(event.group_id, 100, force=True)
+            if not state.session:
+                from llm.mimo import ConversationSession
+                state.session = ConversationSession()
+                state.last_reply_time = time.time()
+                # 补录 @-mention 消息到 session
+                state.session.add_message("user", f'[{event.nickname}] {event.raw_text}')
 
     for msg in pending:
         await group_memory.save_message(
@@ -440,6 +455,7 @@ async def handle_group_message(event: GroupMessageEvent):
 
         await typing_delay(text)
         await send_group_split(event.group_id, text, reply_to=reply_to)
+        _last_bot_msg_time[event.group_id] = time.time()
         humanizer.notify_bot_replied(event.group_id, was_at=True)
 
         # 录入 session
@@ -614,6 +630,7 @@ async def handle_command(cmd: str):
                 msg_start = 2
             msg = " ".join(parts[msg_start:])
             await api_client.send_group_message(int(gid), msg)
+            _last_bot_msg_time[int(gid)] = time.time()
             await group_memory.save_message(
                 int(gid), settings.bot_qq_id, personality.name, msg, is_bot=True
             )
