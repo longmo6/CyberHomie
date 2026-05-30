@@ -82,6 +82,21 @@ async def session_check_loop():
             logger.error("Session check error: %s", e)
 
 
+async def guaranteed_reply_loop():
+    """每10秒检查保底回复：缓冲区有消息 + 超过40秒未回复 → 强制处理"""
+    while True:
+        try:
+            await asyncio.sleep(10)
+            flushed = humanizer.check_guaranteed_reply()
+            for gid, pending in flushed:
+                logger.info("[Group %d] Guaranteed reply: %d buffered messages", gid, len(pending))
+                await process_buffered_messages(gid, pending)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Guaranteed reply error: %s", e)
+
+
 # --- Terminal Dashboard ---
 _debug_mode = False
 _dashboard_lines = 0  # how many lines the dashboard occupies
@@ -347,12 +362,14 @@ async def lifespan(app: FastAPI):
     terminal_thread = threading.Thread(target=terminal_loop, daemon=True)
     terminal_thread.start()
     session_task = asyncio.create_task(session_check_loop())
+    guarantee_task = asyncio.create_task(guaranteed_reply_loop())
     dash_task = asyncio.create_task(dashboard_loop())
     print("\nType 'help' for commands.\n")
 
     yield
 
     session_task.cancel()
+    guarantee_task.cancel()
     dash_task.cancel()
 
     if napcat_process and napcat_process.poll() is None:
@@ -366,6 +383,77 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="CyberHomie", lifespan=lifespan)
+
+
+async def process_buffered_messages(group_id: int, pending: list, trigger_user_id: int = 0):
+    """处理缓冲区消息：存DB → 构建上下文 → LLM决策 → 发送回复"""
+    state = humanizer._get_state(group_id)
+
+    for msg in pending:
+        await group_memory.save_message(group_id, msg.user_id, msg.nickname, msg.text)
+        await user_memory.get_or_create_user(msg.user_id, msg.nickname)
+        await user_memory.increment_message_count(msg.user_id)
+
+    # 用触发用户或最后一条消息的用户做上下文
+    uid = trigger_user_id or (pending[-1].user_id if pending else 0)
+    user_ctx = await build_user_context(uid) if uid else ""
+    group_ctx_list = await group_memory.get_important_memories(group_id)
+    group_file = build_group_context(group_id)
+    if group_file:
+        group_ctx_list.append(group_file)
+
+    session_msgs = state.session.get_messages() if state.session else []
+    if not session_msgs:
+        session_msgs = await build_chat_history(group_id)
+
+    sys_prompt = personality.get_system_prompt(user_ctx, "\n".join(group_ctx_list))
+
+    buffered_data = [
+        {
+            "message_id": m.message_id,
+            "nickname": m.nickname,
+            "text": m.text,
+            "is_at_bot": m.is_at_bot,
+            "images": m.images,
+            "has_sticker": m.has_sticker,
+        }
+        for m in pending
+    ]
+
+    replies = await llm_client.decide_replies(sys_prompt, session_msgs, buffered_data)
+
+    if not replies:
+        print(f"[LLM] Group {group_id}: No reply needed")
+
+    for reply in replies:
+        text = reply.get("text", "")
+        if not text:
+            continue
+        msg_id = reply.get("message_id", 0)
+        quote = reply.get("quote", False)
+
+        if personality.check_forbidden(text):
+            continue
+
+        text = humanizer.post_process_reply(text)
+        if humanizer.is_rejected(text):
+            continue
+        reply_to = msg_id if quote else 0
+
+        await typing_delay(text)
+        await send_group_split(group_id, text, reply_to=reply_to)
+        _last_bot_msg_time[group_id] = time.time()
+        humanizer.notify_bot_replied(group_id, was_at=True)
+
+        if state.session:
+            state.session.add_message("assistant", f'[小夜] {text}')
+
+        await group_memory.save_message(
+            group_id, settings.bot_qq_id, personality.name, text, is_bot=True
+        )
+        if uid:
+            await relationship.update_closeness(uid, 0.01)
+            humanizer.record_replied_user(group_id, uid)
 
 
 # --- Group message handler ---
@@ -399,74 +487,7 @@ async def handle_group_message(event: GroupMessageEvent):
                 # 补录 @-mention 消息到 session
                 state.session.add_message("user", f'[{event.nickname}] {event.raw_text}')
 
-    for msg in pending:
-        await group_memory.save_message(
-            event.group_id, msg.user_id, msg.nickname, msg.text
-        )
-        await user_memory.get_or_create_user(msg.user_id, msg.nickname)
-        await user_memory.increment_message_count(msg.user_id)
-
-    user_ctx = await build_user_context(event.user_id)
-    group_ctx_list = await group_memory.get_important_memories(event.group_id)
-    group_file = build_group_context(event.group_id)
-    if group_file:
-        group_ctx_list.append(group_file)
-
-    # 优先用 session 窗口，否则从 DB 取
-    session_msgs = state.session.get_messages() if state.session else []
-    if not session_msgs:
-        session_msgs = await build_chat_history(event.group_id)
-
-    sys_prompt = personality.get_system_prompt(user_ctx, "\n".join(group_ctx_list))
-
-    # For @-mention, use single-message decision
-    buffered_data = [
-        {
-            "message_id": m.message_id,
-            "nickname": m.nickname,
-            "text": m.text,
-            "is_at_bot": m.is_at_bot,
-            "images": m.images,
-            "has_sticker": m.has_sticker,
-        }
-        for m in pending
-    ]
-
-    print(f"[LLM] Processing {len(pending)} messages (@-mention)")
-    replies = await llm_client.decide_replies(sys_prompt, session_msgs, buffered_data)
-
-    if not replies:
-        print("[LLM] No reply needed")
-
-    for reply in replies:
-        text = reply.get("text", "")
-        if not text:
-            continue
-        msg_id = reply.get("message_id", 0)
-        quote = reply.get("quote", False)
-
-        if personality.check_forbidden(text):
-            continue
-
-        text = humanizer.post_process_reply(text)
-        if humanizer.is_rejected(text):
-            continue
-        reply_to = msg_id if quote else 0
-
-        await typing_delay(text)
-        await send_group_split(event.group_id, text, reply_to=reply_to)
-        _last_bot_msg_time[event.group_id] = time.time()
-        humanizer.notify_bot_replied(event.group_id, was_at=True)
-
-        # 录入 session
-        if state.session:
-            state.session.add_message("assistant", f'[小夜] {text}')
-
-        await group_memory.save_message(
-            event.group_id, settings.bot_qq_id, personality.name, text, is_bot=True
-        )
-        await relationship.update_closeness(event.user_id, 0.01)
-        humanizer.record_replied_user(event.group_id, event.user_id)
+    await process_buffered_messages(event.group_id, pending, trigger_user_id=event.user_id)
 
 
 # --- Private message handler (unchanged, immediate reply) ---

@@ -299,6 +299,22 @@ class Humanizer:
 
         return None
 
+    def check_guaranteed_reply(self) -> List[tuple]:
+        """检查所有群的保底回复条件，返回 [(group_id, messages), ...]"""
+        result = []
+        now = time.time()
+        for gid, state in self._groups.items():
+            if not state.buffer or state.last_reply_time <= 0:
+                continue
+            if not self.is_active(gid):
+                continue
+            elapsed = now - state.last_reply_time
+            if elapsed >= GUARANTEED_REPLY_INTERVAL:
+                messages = state.buffer.copy()
+                state.buffer.clear()
+                result.append((gid, messages))
+        return result
+
     # ============================================================
     # 随机出没调度
     # ============================================================
