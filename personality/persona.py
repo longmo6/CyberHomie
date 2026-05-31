@@ -66,6 +66,11 @@ class Personality:
             prompt += f"\n\n这个群的记忆（包含你在这个群的行为习惯）：\n{group_context}"
             prompt += "\n根据这个群的习惯调整你的行为。不同群可以有不同风格。"
 
+        from datetime import datetime
+        now = datetime.now()
+        weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        prompt += f"\n\n当前时间：{now.strftime('%Y-%m-%d %H:%M')} {weekdays[now.weekday()]}"
+
         prompt += "\n\n现在，像一个真实群友一样回复。简短、随意、自然。"
         return prompt
 
