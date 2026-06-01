@@ -29,6 +29,13 @@ class ConversationSession:
             return self.messages[-limit:]
         return self.messages
 
+    def update_last_user_message(self, new_content: str):
+        """更新最后一条用户消息的内容（用于补充图片描述）"""
+        for i in range(len(self.messages) - 1, -1, -1):
+            if self.messages[i]["role"] == "user":
+                self.messages[i]["content"] = new_content
+                break
+
     def clear(self):
         self.messages.clear()
 
@@ -63,15 +70,7 @@ class LLMClient:
         system_prompt: str,
         chat_history: list[dict],
         user_message: str,
-        images: list[str] = None,
     ) -> str:
-        # 先用 vision 模型描述图片
-        img_desc = ""
-        if images:
-            img_desc = await self.describe_images(images)
-            if img_desc:
-                user_message = f"{user_message}\n[图片: {img_desc}]"
-
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(chat_history[-self.settings.ctx_private:])
         messages.append({"role": "user", "content": user_message})
@@ -195,27 +194,11 @@ class LLMClient:
         Given buffered messages, decide which to reply to.
         Returns list of {"message_id": int, "text": str, "quote": bool}
         """
-        # 先用 vision 模型描述图片
-        image_descriptions = {}
-        for m in buffered:
-            if m.get("images") and not m.get("has_sticker"):
-                desc = await self.describe_images(m["images"])
-                if desc:
-                    image_descriptions[m["message_id"]] = desc
-
-        # 构建消息列表
+        # 构建消息列表（图片描述已在消息文本中）
         msg_list = ""
         for m in buffered:
             at_tag = " [@bot]" if m.get("is_at_bot") else ""
-            if m.get("has_sticker"):
-                img_tag = " [表情包]"
-            elif m["message_id"] in image_descriptions:
-                img_tag = f" [图片: {image_descriptions[m['message_id']]}]"
-            elif m.get("images"):
-                img_tag = " [图片]"
-            else:
-                img_tag = ""
-            msg_list += f'[id={m["message_id"]}] {m["nickname"]}{at_tag}{img_tag}: {m["text"]}\n'
+            msg_list += f'[id={m["message_id"]}] {m["nickname"]}{at_tag}: {m["text"]}\n'
 
         prompt = (
             "以下是你所在群聊最近的消息。你是群里的老群友，不是助手。\n"

@@ -53,15 +53,15 @@ _last_human_msg_time: Dict[int, float] = {}  # 仅记录人类消息时间
 _last_bot_msg_time: Dict[int, float] = {}    # 仅记录 bot 消息时间
 
 # --- 每群最近30条消息滚动容器（始终保存，不受活跃状态影响）---
-_recent_chat: Dict[int, list] = {}  # group_id -> [{"role": ..., "content": ...}, ...]
+_recent_chat: Dict[int, list] = {}  # group_id -> [{"role": ..., "content": ..., "images": [...]}, ...]
 _RECENT_CHAT_LIMIT = 30
 
 
-def _add_recent_chat(group_id: int, role: str, content: str):
+def _add_recent_chat(group_id: int, role: str, content: str, images: list = None):
     """往滚动容器里追加一条消息"""
     if group_id not in _recent_chat:
         _recent_chat[group_id] = []
-    _recent_chat[group_id].append({"role": role, "content": content})
+    _recent_chat[group_id].append({"role": role, "content": content, "images": images or []})
     if len(_recent_chat[group_id]) > _RECENT_CHAT_LIMIT:
         _recent_chat[group_id] = _recent_chat[group_id][-_RECENT_CHAT_LIMIT:]
 
@@ -69,6 +69,23 @@ def _add_recent_chat(group_id: int, role: str, content: str):
 def _get_recent_chat(group_id: int) -> list:
     """获取滚动容器里的消息"""
     return _recent_chat.get(group_id, [])
+
+
+def _update_recent_chat_last(group_id: int, new_content: str):
+    """更新滚动容器里最后一条消息的内容"""
+    if group_id in _recent_chat and _recent_chat[group_id]:
+        _recent_chat[group_id][-1]["content"] = new_content
+
+
+async def _enrich_recent_chat_images(group_id: int):
+    """批量处理滚动容器中未描述的图片"""
+    recent = _get_recent_chat(group_id)
+    for msg in recent:
+        if msg["role"] == "user" and msg.get("images") and "[图片]" in msg["content"] and "[图片:" not in msg["content"]:
+            img_desc = await llm_client.describe_images(msg["images"])
+            if img_desc and img_desc != "[图片]":
+                msg["content"] = msg["content"].replace("[图片]", f"[图片: {img_desc}]", 1)
+            msg["images"] = []  # 清除 URL，避免重复处理
 
 
 # --- Session end callback ---
@@ -212,6 +229,10 @@ async def on_session_start(group_id: int):
     if not recent:
         logger.info("[Group %d] Session start skipped: no recent messages", group_id)
         return
+
+    # 低耗模式：session 启动时补全历史图片描述
+    if not settings.high_resource_mode:
+        await _enrich_recent_chat_images(group_id)
 
     # 预填充 session 窗口
     session_msgs = state.session.get_messages() if state.session else []
@@ -413,8 +434,6 @@ async def process_buffered_messages(group_id: int, pending: list, trigger_user_i
             "nickname": m.nickname,
             "text": m.text,
             "is_at_bot": m.is_at_bot,
-            "images": m.images,
-            "has_sticker": m.has_sticker,
         }
         for m in pending
     ]
@@ -460,18 +479,32 @@ async def process_buffered_messages(group_id: int, pending: list, trigger_user_i
 async def handle_group_message(event: GroupMessageEvent):
     _last_group_msg_time[event.group_id] = time.time()
     _last_human_msg_time[event.group_id] = time.time()
-    _add_recent_chat(event.group_id, "user", f'[{event.nickname}] {event.raw_text}')
-    logger.info("[群%d][%s] %s (at=%s)", event.group_id, event.nickname, event.raw_text[:60], event.is_at_bot)
+
+    # 高耗模式：立即解析图片；低耗模式：只存标签，延迟到活跃期处理
+    msg_text = event.raw_text
+    if event.has_sticker:
+        msg_text = f"{msg_text} [表情包]" if msg_text else "[表情包]"
+    if event.images and not event.has_sticker:
+        if settings.high_resource_mode:
+            img_desc = await llm_client.describe_images(event.images)
+            if img_desc and img_desc != "[图片]":
+                msg_text = f"{msg_text} [图片: {img_desc}]" if msg_text else f"[图片: {img_desc}]"
+            else:
+                msg_text = f"{msg_text} [图片]" if msg_text else "[图片]"
+        else:
+            msg_text = f"{msg_text} [图片]" if msg_text else "[图片]"
+
+    # 存入滚动容器（保留图片 URL 供低耗模式后续补描述）
+    _add_recent_chat(event.group_id, "user", f'[{event.nickname}] {msg_text}', images=event.images)
+    logger.info("[群%d][%s] %s (at=%s)", event.group_id, event.nickname, msg_text[:60], event.is_at_bot)
     recent_messages.append(event)
 
     # 录入 session 滚动窗口
     state = humanizer._get_state(event.group_id)
     if state.session and humanizer.is_active(event.group_id):
-        state.session.add_message("user", f'[{event.nickname}] {event.raw_text}')
+        state.session.add_message("user", f'[{event.nickname}] {msg_text}')
 
     pending = await humanizer.buffer_message(event)
-    if pending is None:
-        return
 
     # @-mention：先检查是否应该回复，再设置参与度
     if event.is_at_bot:
@@ -485,10 +518,31 @@ async def handle_group_message(event: GroupMessageEvent):
                 from llm.mimo import ConversationSession
                 state.session = ConversationSession()
                 state.last_reply_time = time.time()
-                # 预填充滚动容器历史到 session（已包含当前 @-mention 消息）
+                # 低耗模式：session 启动时补全历史图片描述
+                if not settings.high_resource_mode:
+                    await _enrich_recent_chat_images(event.group_id)
+                # 预填充滚动容器历史到 session
                 recent = _get_recent_chat(event.group_id)
                 for msg in recent:
                     state.session.add_message(msg["role"], msg["content"])
+
+    if pending is None:
+        return
+
+    # 低耗模式活跃期：处理当前消息的图片
+    if not settings.high_resource_mode and event.images and not event.has_sticker:
+        img_desc = await llm_client.describe_images(event.images)
+        if img_desc and img_desc != "[图片]":
+            enriched = f'[{event.nickname}] {event.raw_text} [图片: {img_desc}]'
+        else:
+            enriched = f'[{event.nickname}] {event.raw_text} [图片]'
+        _update_recent_chat_last(event.group_id, enriched)
+        if state.session:
+            state.session.update_last_user_message(enriched)
+        for m in pending:
+            if m.message_id == event.message_id:
+                m.text = f'{event.raw_text} [图片: {img_desc}]' if img_desc and img_desc != "[图片]" else f'{event.raw_text} [图片]'
+                break
 
     await process_buffered_messages(event.group_id, pending, trigger_user_id=event.user_id)
 
@@ -509,7 +563,19 @@ async def handle_private_message(event: PrivateMessageEvent):
 
     await user_memory.get_or_create_user(event.user_id, event.nickname)
     await user_memory.increment_message_count(event.user_id)
-    await group_memory.save_message(0, event.user_id, event.nickname, event.raw_text)
+
+    # 提前处理图片
+    msg_text = event.raw_text
+    if event.images and not event.has_sticker:
+        img_desc = await llm_client.describe_images(event.images)
+        if img_desc and img_desc != "[图片]":
+            msg_text = f"{msg_text} [图片: {img_desc}]" if msg_text else f"[图片: {img_desc}]"
+        elif event.images:
+            msg_text = f"{msg_text} [图片]" if msg_text else "[图片]"
+    if event.has_sticker:
+        msg_text = f"{msg_text} [表情包]" if msg_text else "[表情包]"
+
+    await group_memory.save_message(0, event.user_id, event.nickname, msg_text)
 
     user_ctx = await build_user_context(event.user_id)
     raw_msgs = await group_memory.get_recent_messages(0, limit=50)
@@ -529,8 +595,7 @@ async def handle_private_message(event: PrivateMessageEvent):
         sys_prompt += "\n\n你聊了一会儿了，开始有点想做别的事了。回复可以简短一些。"
 
     reply = await llm_client.generate_reply(
-        sys_prompt, chat_history, event.raw_text,
-        images=event.images if event.images else None,
+        sys_prompt, chat_history, msg_text,
     )
     if not reply:
         return
