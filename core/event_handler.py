@@ -79,6 +79,10 @@ class EventHandler:
                 qq = seg.get("data", {}).get("qq", "")
                 if str(qq) == str(self.bot_qq_id):
                     is_at_bot = True
+                else:
+                    # 非 bot 的 @ 也加入 raw_text，让 LLM 知道谁被 @ 了
+                    at_name = seg.get("data", {}).get("name", str(qq))
+                    text_parts.append(f"@{at_name}")
                 full_parts.append(f"@{qq}")
             elif seg_type == "image":
                 sub_type = seg.get("data", {}).get("subType", 0)
