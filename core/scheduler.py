@@ -24,20 +24,22 @@ class BackgroundScheduler:
         self.group_memory = group_memory
         self.llm_client = llm_client
         self.group_ids = settings.group_ids
+        self.summarize_hours = settings.summarize_interval_hours
+        self.profile_hours = settings.profile_update_interval_hours
         self.scheduler = AsyncIOScheduler()
 
     def start(self):
         self.scheduler.add_job(
             self.summarize_recent_chat,
             "interval",
-            hours=2,
+            hours=self.summarize_hours,
             id="summarize_chat",
             replace_existing=True,
         )
         self.scheduler.add_job(
             self.update_user_profiles,
             "interval",
-            hours=6,
+            hours=self.profile_hours,
             id="update_profiles",
             replace_existing=True,
         )

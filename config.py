@@ -20,10 +20,14 @@ class Settings(BaseSettings):
             return set()
         return {int(x.strip()) for x in self.target_group_ids.split(",") if x.strip()}
 
-    # LLM (SiliconFlow)
+    # LLM
     mimo_api_key: str = ""
     mimo_base_url: str = "https://api.xiaomimimo.com/v1"
-    mimo_model: str = "mimo-v2.5"
+    mimo_model: str = "mimo-v2.5-pro"
+    mimo_vision_model: str = "mimo-v2.5"
+
+    # Resource mode: true = high (larger context, more frequent updates), false = low (save tokens)
+    high_resource_mode: bool = True
 
     # Humanizer - active session pattern
     base_reply_probability: float = 0.15
@@ -41,6 +45,39 @@ class Settings(BaseSettings):
     db_path: str = "data/cyberhomie.db"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    # --- Mode-dependent values ---
+    @property
+    def ctx_private(self) -> int:
+        return 80 if self.high_resource_mode else 50
+
+    @property
+    def ctx_group(self) -> int:
+        return 50 if self.high_resource_mode else 30
+
+    @property
+    def ctx_join(self) -> int:
+        return 50 if self.high_resource_mode else 30
+
+    @property
+    def session_max_messages(self) -> int:
+        return 200 if self.high_resource_mode else 100
+
+    @property
+    def memory_inject_chars(self) -> int:
+        return 1500 if self.high_resource_mode else 800
+
+    @property
+    def memory_max_chars(self) -> int:
+        return 3000 if self.high_resource_mode else 1500
+
+    @property
+    def summarize_interval_hours(self) -> int:
+        return 1 if self.high_resource_mode else 2
+
+    @property
+    def profile_update_interval_hours(self) -> int:
+        return 3 if self.high_resource_mode else 6
 
 
 settings = Settings()

@@ -38,8 +38,8 @@ db = Database(settings.db_path)
 user_memory = UserMemory(db)
 group_memory = GroupMemory(db)
 relationship = RelationshipGraph(db)
-user_file_memory = UserFileMemory(db, llm_client)
-group_file_memory = GroupFileMemory(db, llm_client)
+user_file_memory = UserFileMemory(db, llm_client, settings)
+group_file_memory = GroupFileMemory(db, llm_client, settings)
 recent_messages: deque[GroupMessageEvent] = deque(maxlen=50)
 scheduler = BackgroundScheduler(db, user_memory, group_memory, llm_client, settings)
 
@@ -51,6 +51,24 @@ loop: Optional[asyncio.AbstractEventLoop] = None
 _last_group_msg_time: Dict[int, float] = {}
 _last_human_msg_time: Dict[int, float] = {}  # 仅记录人类消息时间
 _last_bot_msg_time: Dict[int, float] = {}    # 仅记录 bot 消息时间
+
+# --- 每群最近30条消息滚动容器（始终保存，不受活跃状态影响）---
+_recent_chat: Dict[int, list] = {}  # group_id -> [{"role": ..., "content": ...}, ...]
+_RECENT_CHAT_LIMIT = 30
+
+
+def _add_recent_chat(group_id: int, role: str, content: str):
+    """往滚动容器里追加一条消息"""
+    if group_id not in _recent_chat:
+        _recent_chat[group_id] = []
+    _recent_chat[group_id].append({"role": role, "content": content})
+    if len(_recent_chat[group_id]) > _RECENT_CHAT_LIMIT:
+        _recent_chat[group_id] = _recent_chat[group_id][-_RECENT_CHAT_LIMIT:]
+
+
+def _get_recent_chat(group_id: int) -> list:
+    """获取滚动容器里的消息"""
+    return _recent_chat.get(group_id, [])
 
 
 # --- Session end callback ---
@@ -181,75 +199,56 @@ _PRIVATE_COOLDOWN = 1800   # 停止后冷却30分钟
 
 
 async def on_session_start(group_id: int):
-    """随机出没启动时，根据最后一条人类消息决定是插话还是开话题。"""
+    """随机出没启动时，根据最近聊天内容接话。"""
     group_file = build_group_context(group_id)
     group_ctx_list = await group_memory.get_important_memories(group_id)
     if group_file:
         group_ctx_list.append(group_file)
     sys_prompt = personality.get_system_prompt("", "\n".join(group_ctx_list))
 
-    # session 窗口（刚创建时为空，回退到 DB 历史）
+    # 从滚动容器取最近消息，预填充到 session 窗口
     state = humanizer._get_state(group_id)
+    recent = _get_recent_chat(group_id)
+    if not recent:
+        logger.info("[Group %d] Session start skipped: no recent messages", group_id)
+        return
+
+    # 预填充 session 窗口
     session_msgs = state.session.get_messages() if state.session else []
     if not session_msgs:
-        session_msgs = await build_chat_history(group_id, limit=30)
+        for msg in recent:
+            state.session.add_message(msg["role"], msg["content"])
+        session_msgs = recent
 
-    # 检查最近 2 分钟是否有人类活动
-    last_msg_time = _last_human_msg_time.get(group_id, 0)
-    recent_active = last_msg_time > 0 and time.time() - last_msg_time < 120
-
-    # 如果 bot 发言后没人接话，跳过（防止自言自语）
-    bot_last = _last_bot_msg_time.get(group_id, 0)
-    if not recent_active and bot_last > last_msg_time:
-        logger.info("[Group %d] Session start skipped: no reply after bot's last msg", group_id)
+    # 如果最后一条是 bot 发的，跳过（防止自言自语）
+    if session_msgs and session_msgs[-1].get("role") == "assistant":
+        logger.info("[Group %d] Session start skipped: last msg is bot's", group_id)
         return
 
-    if recent_active:
-        # 群里正在聊天，根据历史记录插一句话
-        text = await llm_client.generate_join_reply(sys_prompt, session_msgs)
-        if not text:
-            print(f"[Bot][群{group_id}] join_reply: LLM returned empty")
-        elif personality.check_forbidden(text):
-            print(f"[Bot][群{group_id}] join_reply: forbidden pattern -> {text[:40]}")
-        else:
-            text = humanizer.post_process_reply(text)
-            if humanizer.is_rejected(text):
-                print(f"[Bot][群{group_id}] join_reply: rejected -> {text[:40]}")
-            else:
-                await typing_delay(text)
-                await api_client.send_group_message(group_id, text)
-                _last_bot_msg_time[group_id] = time.time()
-                humanizer.notify_bot_replied(group_id)
-                logger.info("[Bot][群%d][插话] -> %s", group_id, text[:60])
-                if state.session:
-                    state.session.add_message("assistant", f'[小夜] {text}')
-                await group_memory.save_message(
-                    group_id, settings.bot_qq_id, personality.name, text, is_bot=True
-                )
+    # 根据最近聊天内容接话
+    text = await llm_client.generate_join_reply(sys_prompt, session_msgs)
+    if not text:
+        print(f"[Bot][群{group_id}] join_reply: LLM returned empty")
+        return
+    if personality.check_forbidden(text):
+        print(f"[Bot][群{group_id}] join_reply: forbidden pattern -> {text[:40]}")
         return
 
-    # 安静超过 2 分钟，开话题
-    topic = await llm_client.generate_topic(sys_prompt, session_msgs)
-    if not topic:
-        print(f"[Bot][群{group_id}] generate_topic: LLM returned empty")
-        return
-    if personality.check_forbidden(topic):
-        print(f"[Bot][群{group_id}] generate_topic: forbidden pattern -> {topic[:40]}")
+    text = humanizer.post_process_reply(text)
+    if humanizer.is_rejected(text):
+        print(f"[Bot][群{group_id}] join_reply: rejected -> {text[:40]}")
         return
 
-    topic = humanizer.post_process_reply(topic)
-    if humanizer.is_rejected(topic):
-        print(f"[Bot][群{group_id}] generate_topic: rejected -> {topic[:40]}")
-        return
-    await typing_delay(topic)
-    await api_client.send_group_message(group_id, topic)
+    await typing_delay(text)
+    await api_client.send_group_message(group_id, text)
     _last_bot_msg_time[group_id] = time.time()
+    _add_recent_chat(group_id, "assistant", f'[小夜] {text}')
     humanizer.notify_bot_replied(group_id)
-    logger.info("[Bot][群%d][主动] -> %s", group_id, topic[:60])
+    logger.info("[Bot][群%d][接话] -> %s", group_id, text[:60])
     if state.session:
-        state.session.add_message("assistant", f'[小夜] {topic}')
+        state.session.add_message("assistant", f'[小夜] {text}')
     await group_memory.save_message(
-        group_id, settings.bot_qq_id, personality.name, topic, is_bot=True
+        group_id, settings.bot_qq_id, personality.name, text, is_bot=True
     )
 
 
@@ -404,7 +403,7 @@ async def process_buffered_messages(group_id: int, pending: list, trigger_user_i
 
     session_msgs = state.session.get_messages() if state.session else []
     if not session_msgs:
-        session_msgs = await build_chat_history(group_id)
+        session_msgs = _get_recent_chat(group_id) or await build_chat_history(group_id)
 
     sys_prompt = personality.get_system_prompt(user_ctx, "\n".join(group_ctx_list))
 
@@ -443,6 +442,7 @@ async def process_buffered_messages(group_id: int, pending: list, trigger_user_i
         await typing_delay(text)
         await send_group_split(group_id, text, reply_to=reply_to)
         _last_bot_msg_time[group_id] = time.time()
+        _add_recent_chat(group_id, "assistant", f'[小夜] {text}')
         humanizer.notify_bot_replied(group_id, was_at=True)
 
         if state.session:
@@ -460,6 +460,7 @@ async def process_buffered_messages(group_id: int, pending: list, trigger_user_i
 async def handle_group_message(event: GroupMessageEvent):
     _last_group_msg_time[event.group_id] = time.time()
     _last_human_msg_time[event.group_id] = time.time()
+    _add_recent_chat(event.group_id, "user", f'[{event.nickname}] {event.raw_text}')
     logger.info("[群%d][%s] %s (at=%s)", event.group_id, event.nickname, event.raw_text[:60], event.is_at_bot)
     recent_messages.append(event)
 
@@ -484,8 +485,10 @@ async def handle_group_message(event: GroupMessageEvent):
                 from llm.mimo import ConversationSession
                 state.session = ConversationSession()
                 state.last_reply_time = time.time()
-                # 补录 @-mention 消息到 session
-                state.session.add_message("user", f'[{event.nickname}] {event.raw_text}')
+                # 预填充滚动容器历史到 session（已包含当前 @-mention 消息）
+                recent = _get_recent_chat(event.group_id)
+                for msg in recent:
+                    state.session.add_message(msg["role"], msg["content"])
 
     await process_buffered_messages(event.group_id, pending, trigger_user_id=event.user_id)
 
@@ -652,6 +655,7 @@ async def handle_command(cmd: str):
             msg = " ".join(parts[msg_start:])
             await api_client.send_group_message(int(gid), msg)
             _last_bot_msg_time[int(gid)] = time.time()
+            _add_recent_chat(int(gid), "assistant", f'[小夜] {msg}')
             await group_memory.save_message(
                 int(gid), settings.bot_qq_id, personality.name, msg, is_bot=True
             )

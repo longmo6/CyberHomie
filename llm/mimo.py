@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 
+from httpx import Timeout
 from openai import AsyncOpenAI
 
 from config import Settings
@@ -13,7 +15,7 @@ logger = setup_logger("llm")
 class ConversationSession:
     """Session-scoped rolling conversation window."""
 
-    def __init__(self, max_messages: int = 100):
+    def __init__(self, max_messages: int = 200):
         self.messages: list[dict] = []
         self.max_messages = max_messages
 
@@ -39,8 +41,11 @@ class LLMClient:
         self.client = AsyncOpenAI(
             api_key=settings.mimo_api_key,
             base_url=settings.mimo_base_url,
+            timeout=Timeout(60.0, connect=10.0),
         )
         self.model = settings.mimo_model
+        self.vision_model = settings.mimo_vision_model
+        self.settings = settings
 
     @staticmethod
     def _build_content(text: str, images: list[str] = None) -> str | list:
@@ -60,9 +65,16 @@ class LLMClient:
         user_message: str,
         images: list[str] = None,
     ) -> str:
+        # 先用 vision 模型描述图片
+        img_desc = ""
+        if images:
+            img_desc = await self.describe_images(images)
+            if img_desc:
+                user_message = f"{user_message}\n[图片: {img_desc}]"
+
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(chat_history[-50:])
-        messages.append({"role": "user", "content": self._build_content(user_message, images)})
+        messages.extend(chat_history[-self.settings.ctx_private:])
+        messages.append({"role": "user", "content": user_message})
 
         try:
             resp = await self.client.chat.completions.create(
@@ -71,13 +83,23 @@ class LLMClient:
                 temperature=0.85,
                 top_p=0.9,
             )
-            content = resp.choices[0].message.content
-            return content.strip() if content else ""
+            choice = resp.choices[0]
+            content = choice.message.content
+            usage = getattr(resp, "usage", None)
+            if usage:
+                print(f"[LLM] generate_reply ({self.model}): prompt={usage.prompt_tokens}, completion={usage.completion_tokens}")
+            if not content:
+                reason = getattr(choice, "finish_reason", "unknown")
+                print(f"[LLM] generate_reply: content=None, finish_reason={reason}")
+                return ""
+            return content.strip()
         except Exception as e:
             logger.error("LLM call failed: %s", e)
+            print(f"[LLM] generate_reply error: {e}")
             return ""
 
     async def summarize_chat(self, messages: list[dict]) -> str:
+        url_pattern = re.compile(r'https?://\S+')
         prompt = (
             "你是一个群聊观察者。请用2-3句话总结以下聊天记录的要点，"
             "包括谁说了什么重要的事、有什么梗或争论。用中文，随意一点。\n\n"
@@ -85,6 +107,9 @@ class LLMClient:
         for msg in messages:
             sender = msg.get("nickname", "未知")
             content = msg.get("content", "")
+            content = url_pattern.sub("[图片]", content).strip()
+            if not content:
+                continue
             prompt += f"{sender}: {content}\n"
 
         try:
@@ -94,12 +119,17 @@ class LLMClient:
                 temperature=0.7,
             )
             content = resp.choices[0].message.content
+            usage = getattr(resp, "usage", None)
+            if usage:
+                print(f"[LLM] summarize_chat: prompt={usage.prompt_tokens}, completion={usage.completion_tokens}")
             return content.strip() if content else ""
         except Exception as e:
             logger.error("Summarize failed: %s", e)
+            print(f"[LLM] summarize_chat error: {e}")
             return ""
 
     async def analyze_user(self, nickname: str, messages: list[dict]) -> dict:
+        url_pattern = re.compile(r'https?://\S+')
         prompt = (
             f"你是一个群聊观察者。根据以下{nickname}的聊天记录，分析这个人的特点。\n"
             "返回JSON格式：\n"
@@ -108,7 +138,11 @@ class LLMClient:
             f"聊天记录：\n"
         )
         for msg in messages:
-            prompt += f"{msg.get('content', '')}\n"
+            content = msg.get('content', '')
+            content = url_pattern.sub("[图片]", content).strip()
+            if not content:
+                continue
+            prompt += f"{content}\n"
 
         try:
             resp = await self.client.chat.completions.create(
@@ -118,10 +152,38 @@ class LLMClient:
                 response_format={"type": "json_object"},
             )
             content = resp.choices[0].message.content
+            usage = getattr(resp, "usage", None)
+            if usage:
+                print(f"[LLM] analyze_user: prompt={usage.prompt_tokens}, completion={usage.completion_tokens}")
             return json.loads(content) if content else {}
         except Exception as e:
             logger.error("Analyze user failed: %s", e)
+            print(f"[LLM] analyze_user error: {e}")
             return {}
+
+    async def describe_images(self, images: list[str]) -> str:
+        """用 vision 模型描述图片内容，返回简短描述"""
+        if not images:
+            return ""
+        content = []
+        for url in images:
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        content.append({"type": "text", "text": "简短描述这张图片的内容，一句话即可。"})
+        try:
+            resp = await self.client.chat.completions.create(
+                model=self.vision_model,
+                messages=[{"role": "user", "content": content}],
+                max_completion_tokens=200,
+                temperature=0.3,
+            )
+            desc = resp.choices[0].message.content
+            result = desc.strip() if desc else "[图片]"
+            print(f"[LLM] describe_images ({self.vision_model}): {result}")
+            return result
+        except Exception as e:
+            logger.error("describe_images failed: %s", e)
+            print(f"[LLM] describe_images error: {e}")
+            return "[图片]"
 
     async def decide_replies(
         self,
@@ -133,19 +195,27 @@ class LLMClient:
         Given buffered messages, decide which to reply to.
         Returns list of {"message_id": int, "text": str, "quote": bool}
         """
-        # Build message list, distinguishing stickers from regular images
+        # 先用 vision 模型描述图片
+        image_descriptions = {}
+        for m in buffered:
+            if m.get("images") and not m.get("has_sticker"):
+                desc = await self.describe_images(m["images"])
+                if desc:
+                    image_descriptions[m["message_id"]] = desc
+
+        # 构建消息列表
         msg_list = ""
-        all_images = []
         for m in buffered:
             at_tag = " [@bot]" if m.get("is_at_bot") else ""
             if m.get("has_sticker"):
                 img_tag = " [表情包]"
+            elif m["message_id"] in image_descriptions:
+                img_tag = f" [图片: {image_descriptions[m['message_id']]}]"
             elif m.get("images"):
-                img_tag = " [含图片]"
+                img_tag = " [图片]"
             else:
                 img_tag = ""
             msg_list += f'[id={m["message_id"]}] {m["nickname"]}{at_tag}{img_tag}: {m["text"]}\n'
-            all_images.extend(m.get("images", []))
 
         prompt = (
             "以下是你所在群聊最近的消息。你是群里的老群友，不是助手。\n"
@@ -176,12 +246,10 @@ class LLMClient:
             '只输出JSON，不要其他内容。'
         )
 
+        # 始终用 pro 模型做决策（图片已转为文字描述）
         messages_for_llm = [{"role": "system", "content": system_prompt}]
-        messages_for_llm.extend(session_messages[-30:])
-        messages_for_llm.append({
-            "role": "user",
-            "content": self._build_content(prompt, all_images if all_images else None),
-        })
+        messages_for_llm.extend(session_messages[-self.settings.ctx_group:])
+        messages_for_llm.append({"role": "user", "content": prompt})
 
         try:
             resp = await self.client.chat.completions.create(
@@ -191,15 +259,22 @@ class LLMClient:
                 top_p=0.9,
                 response_format={"type": "json_object"},
             )
-            content = resp.choices[0].message.content
+            choice = resp.choices[0]
+            content = choice.message.content
+            usage = getattr(resp, "usage", None)
+            if usage:
+                print(f"[LLM] decide_replies ({self.model}): prompt={usage.prompt_tokens}, completion={usage.completion_tokens}")
             if not content:
+                reason = getattr(choice, "finish_reason", "unknown")
+                print(f"[LLM] decide_replies: content=None, finish_reason={reason}")
                 return []
             data = json.loads(content)
             replies = data.get("replies", [])
-            logger.debug("LLM decided %d replies", len(replies))
+            print(f"[LLM] decide_replies: {len(replies)} replies")
             return replies
         except Exception as e:
             logger.error("decide_replies failed: %s", e)
+            print(f"[LLM] decide_replies error: {e}")
             return []
 
     async def generate_topic(
@@ -218,7 +293,7 @@ class LLMClient:
         )
 
         messages_for_llm = [{"role": "system", "content": system_prompt}]
-        messages_for_llm.extend(session_messages[-10:])
+        messages_for_llm.extend(session_messages[-self.settings.ctx_join:])
         messages_for_llm.append({"role": "user", "content": prompt})
 
         try:
@@ -246,13 +321,13 @@ class LLMClient:
     async def generate_join_reply(
         self, system_prompt: str, session_messages: list[dict]
     ) -> str:
-        """Generate a reply to join an ongoing conversation."""
+        """Generate a reply based on recent chat history."""
         prompt = (
-            "群里正在聊天，你想插句话参与进去。\n"
-            "根据最近的聊天内容，自然地接一句话融入对话。\n"
+            "看看最近的聊天记录，你想说点什么。\n"
+            "可以接话、可以吐槽、可以顺着话题聊、也可以从聊天内容里引出新话题。\n"
             "要求：\n"
-            "- 像群友随意插嘴一样自然\n"
-            "- 对刚才聊的内容发表看法、吐槽、补充、提问都行\n"
+            "- 像群友随口说话一样自然\n"
+            "- 基于聊天内容来说，不要凭空开一个完全无关的话题\n"
             "- 一句话就行，不要太长\n"
             "- 不要重复别人说过的话\n"
             "- 不要太正式，口语化\n\n"
@@ -260,7 +335,7 @@ class LLMClient:
         )
 
         messages_for_llm = [{"role": "system", "content": system_prompt}]
-        messages_for_llm.extend(session_messages[-15:])
+        messages_for_llm.extend(session_messages[-self.settings.ctx_join:])
         messages_for_llm.append({"role": "user", "content": prompt})
 
         try:

@@ -103,6 +103,7 @@ class Humanizer:
     def __init__(self, settings: Settings):
         self.active_hour_start = settings.active_hour_start
         self.active_hour_end = settings.active_hour_end
+        self._session_max_messages = settings.session_max_messages
 
         # 每群独立状态（group_id -> GroupState）
         self._groups: Dict[int, GroupState] = {}
@@ -386,7 +387,7 @@ class Humanizer:
             state.next_session_time = 0  # 清零，用于标记 session 进行中
             state.at_last_recharge = 0
             state.active_users.clear()
-            state.session = ConversationSession()
+            state.session = ConversationSession(max_messages=self._session_max_messages)
             state.last_reply_time = now
             logger.info("[Group %d] Random session (engagement=%d)", group_id, engage)
             if self._on_session_start:
@@ -410,7 +411,7 @@ class Humanizer:
         state.next_session_time = 0
         state.at_last_recharge = 0
         state.active_users.clear()
-        state.session = ConversationSession()
+        state.session = ConversationSession(max_messages=self._session_max_messages)
         state.last_reply_time = now
         logger.info("[Group %d] Forced session (engagement=%d)", group_id, engage)
         if self._on_session_start:
