@@ -6,6 +6,7 @@ import sys
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Dict, Optional, List
 
 import uvicorn
@@ -16,7 +17,7 @@ from core.event_handler import EventHandler, GroupMessageEvent, PrivateMessageEv
 from core.napcat import NapCatAPIClient
 from core.scheduler import BackgroundScheduler
 from humanizer.humanizer import Humanizer, BufferedMessage
-from llm.mimo import LLMClient
+from llm.mimo import LLMClient, ConversationSession
 from memory.database import Database
 from memory.group_memory import GroupMemory
 from memory.relationship import RelationshipGraph
@@ -117,15 +118,82 @@ async def session_check_loop():
             logger.error("Session check error: %s", e)
 
 
+async def _process_private_buffer(user_id: int, buffered: list):
+    """处理私聊缓冲区消息"""
+    state = _get_private_state(user_id)
+
+    # 存 DB
+    for msg in buffered:
+        await group_memory.save_message(0, msg["user_id"], msg["nickname"], msg["text"])
+
+    # 构建上下文
+    user_ctx = await build_user_context(user_id)
+    session_msgs = state.session.get_messages() if state.session else []
+    if not session_msgs:
+        raw_msgs = await group_memory.get_recent_messages(0, limit=50)
+        for msg in raw_msgs:
+            if msg["role"] == "assistant":
+                session_msgs.append({"role": "assistant", "content": f'[小夜] {msg["content"]}'})
+            else:
+                session_msgs.append({"role": "user", "content": f'[{msg["nickname"]}] {msg["content"]}'})
+
+    sys_prompt = personality.get_private_system_prompt(user_ctx)
+
+    if state.reply_count > 10:
+        sys_prompt += "\n\n你已经聊了很久了，开始有点累了。回复变短变敷衍。"
+    elif state.reply_count > 5:
+        sys_prompt += "\n\n你聊了一会儿了，回复可以简短一些。"
+
+    user_message = "\n".join([f'{m["nickname"]}: {m["text"]}' for m in buffered])
+
+    reply = await llm_client.generate_reply(sys_prompt, session_msgs, user_message)
+    if not reply:
+        return
+    if personality.check_forbidden(reply):
+        return
+
+    reply = humanizer.post_process_reply(reply)
+    if humanizer.is_rejected(reply):
+        return
+
+    await typing_delay(reply)
+    await send_private_split(user_id, reply)
+    state.reply_count += 1
+    state.last_reply_time = time.time()
+
+    if state.session:
+        state.session.add_message("assistant", f'[小夜] {reply}')
+
+    await group_memory.save_message(0, settings.bot_qq_id, personality.name, reply, is_bot=True)
+    await relationship.update_closeness(user_id, 0.02)
+
+
 async def guaranteed_reply_loop():
-    """每10秒检查保底回复：缓冲区有消息 + 超过40秒未回复 → 强制处理"""
+    """每10秒检查保底回复：缓冲区有消息 + 超过阈值未回复 → 强制处理"""
     while True:
         try:
             await asyncio.sleep(10)
+            # 群聊保底
             flushed = humanizer.check_guaranteed_reply()
             for gid, pending in flushed:
                 logger.info("[Group %d] Guaranteed reply: %d buffered messages", gid, len(pending))
+                # 低耗模式：补全图片描述
+                if not settings.high_resource_mode:
+                    for m in pending:
+                        if m.images and "[图片]" in m.text and "[图片:" not in m.text:
+                            img_desc = await llm_client.describe_images(m.images)
+                            if img_desc and img_desc != "[图片]":
+                                m.text = m.text.replace("[图片]", f"[图片: {img_desc}]", 1)
                 await process_buffered_messages(gid, pending)
+            # 私聊保底
+            for uid, state in list(_private_states.items()):
+                if state.buffer and state.last_reply_time > 0:
+                    elapsed = time.time() - state.last_reply_time
+                    if elapsed >= 30:
+                        buffered = state.buffer.copy()
+                        state.buffer.clear()
+                        logger.info("[Private %d] Guaranteed reply: %d buffered messages", uid, len(buffered))
+                        await _process_private_buffer(uid, buffered)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -174,11 +242,11 @@ def _render_dashboard():
             lines.append(f"    Status:  IDLE")
 
     # Private chat
-    if _private_reply_count:
+    if _private_states:
         lines.append("  Private Chats:")
-        for uid, count in sorted(_private_reply_count.items(), key=lambda x: -x[1]):
-            if count > 0:
-                lines.append(f"    {uid}: {count} replies")
+        for uid, state in sorted(_private_states.items(), key=lambda x: -x[1].reply_count):
+            if state.reply_count > 0:
+                lines.append(f"    {uid}: {state.reply_count} replies, buf={len(state.buffer)}")
 
     lines.append("═" * 60)
     lines.append("  Type 'debug' to toggle | 'help' for commands")
@@ -208,11 +276,32 @@ async def dashboard_loop():
             pass
 
 
-# --- 私聊参与度 ---
-_private_reply_count: Dict[int, int] = {}  # user_id -> 连续回复次数
-_private_last_reply: Dict[int, float] = {}  # user_id -> 上次回复时间
-_PRIVATE_MAX_REPLIES = settings.private_reply_limit  # 高耗模式下为999999（无限制）
-_PRIVATE_COOLDOWN = 1800   # 停止后冷却30分钟
+# --- 私聊状态（类似群聊的缓冲区机制）---
+@dataclass
+class PrivateChatState:
+    engagement: float = 0.0
+    engage_set_time: float = 0.0
+    buffer: list = field(default_factory=list)
+    session: Optional[ConversationSession] = None
+    last_reply_time: float = 0.0
+    reply_count: int = 0
+
+_private_states: Dict[int, PrivateChatState] = {}
+
+
+def _get_private_state(user_id: int) -> PrivateChatState:
+    if user_id not in _private_states:
+        _private_states[user_id] = PrivateChatState()
+    return _private_states[user_id]
+
+
+def _is_private_active(user_id: int) -> bool:
+    state = _get_private_state(user_id)
+    if state.engagement <= 0:
+        return False
+    elapsed = time.time() - state.engage_set_time
+    decay = elapsed / _PRIVATE_ENGAGEMENT_DECAY * 100
+    return max(0.0, state.engagement - decay) > 0
 
 
 async def on_session_start(group_id: int):
@@ -409,6 +498,7 @@ app = FastAPI(title="CyberHomie", lifespan=lifespan)
 async def process_buffered_messages(group_id: int, pending: list, trigger_user_id: int = 0):
     """处理缓冲区消息：存DB → 构建上下文 → LLM决策 → 发送回复"""
     state = humanizer._get_state(group_id)
+    was_at = any(m.is_at_bot for m in pending)
 
     for msg in pending:
         await group_memory.save_message(group_id, msg.user_id, msg.nickname, msg.text)
@@ -463,7 +553,7 @@ async def process_buffered_messages(group_id: int, pending: list, trigger_user_i
         await send_group_split(group_id, text, reply_to=reply_to)
         _last_bot_msg_time[group_id] = time.time()
         _add_recent_chat(group_id, "assistant", f'[小夜] {text}')
-        humanizer.notify_bot_replied(group_id, was_at=True)
+        humanizer.notify_bot_replied(group_id, was_at=was_at)
 
         if state.session:
             state.session.add_message("assistant", f'[小夜] {text}')
@@ -519,7 +609,6 @@ async def handle_group_message(event: GroupMessageEvent):
         if not humanizer.is_active(event.group_id):
             humanizer.trigger_active(event.group_id, 100, force=True)
             if not state.session:
-                from llm.mimo import ConversationSession
                 state.session = ConversationSession()
                 state.last_reply_time = time.time()
                 # 低耗模式：session 启动时补全历史图片描述
@@ -560,73 +649,64 @@ async def handle_group_message(event: GroupMessageEvent):
     await process_buffered_messages(event.group_id, pending, trigger_user_id=event.user_id)
 
 
-# --- Private message handler (unchanged, immediate reply) ---
+# --- Private message handler (带缓冲区机制) ---
 async def handle_private_message(event: PrivateMessageEvent):
     logger.info("[私聊][%s] %s", event.nickname, event.raw_text[:80])
-
-    # 私聊参与度检查
-    count = _private_reply_count.get(event.user_id, 0)
-    if count >= _PRIVATE_MAX_REPLIES:
-        # 冷却中，检查是否过了冷却期
-        last_reply = _private_last_reply.get(event.user_id, 0)
-        if time.time() - last_reply > _PRIVATE_COOLDOWN:
-            _private_reply_count[event.user_id] = 0  # 重置
-        else:
-            return  # 还在冷却中
 
     await user_memory.get_or_create_user(event.user_id, event.nickname)
     await user_memory.increment_message_count(event.user_id)
 
-    # 提前处理图片
+    # 提前处理图片（遵循资源模式设置）
     msg_text = event.raw_text
     if event.images and not event.has_sticker:
-        img_desc = await llm_client.describe_images(event.images)
-        if img_desc and img_desc != "[图片]":
-            msg_text = f"{msg_text} [图片: {img_desc}]" if msg_text else f"[图片: {img_desc}]"
-        elif event.images:
+        if settings.high_resource_mode:
+            img_desc = await llm_client.describe_images(event.images)
+            if img_desc and img_desc != "[图片]":
+                msg_text = f"{msg_text} [图片: {img_desc}]" if msg_text else f"[图片: {img_desc}]"
+            elif event.images:
+                msg_text = f"{msg_text} [图片]" if msg_text else "[图片]"
+        else:
             msg_text = f"{msg_text} [图片]" if msg_text else "[图片]"
     if event.has_sticker:
         msg_text = f"{msg_text} [表情包]" if msg_text else "[表情包]"
 
-    await group_memory.save_message(0, event.user_id, event.nickname, msg_text)
+    # 激活私聊参与度
+    state = _get_private_state(event.user_id)
+    state.engagement = 100
+    state.engage_set_time = time.time()
 
-    user_ctx = await build_user_context(event.user_id)
-    raw_msgs = await group_memory.get_recent_messages(0, limit=50)
-    chat_history = []
-    for msg in raw_msgs:
-        if msg["role"] == "assistant":
-            chat_history.append({"role": "assistant", "content": f'[小夜] {msg["content"]}'})
-        else:
-            chat_history.append({"role": "user", "content": f'[{msg["nickname"]}] {msg["content"]}'})
+    # 创建 session（如果没有）
+    if not state.session:
+        state.session = ConversationSession()
 
-    sys_prompt = personality.get_private_system_prompt(user_ctx)
+    # 录入 session
+    state.session.add_message("user", f'[{event.nickname}] {msg_text}')
 
-    # 根据连续回复次数调整行为
-    if count > 10:
-        sys_prompt += "\n\n你已经聊了很久了，开始有点累了。回复变短变敷衍，可以只回一个字或表情。"
-    elif count > 5:
-        sys_prompt += "\n\n你聊了一会儿了，开始有点想做别的事了。回复可以简短一些。"
+    # 加入缓冲区
+    state.buffer.append({"user_id": event.user_id, "nickname": event.nickname, "text": msg_text})
 
-    reply = await llm_client.generate_reply(
-        sys_prompt, chat_history, msg_text,
-    )
-    if not reply:
+    # 检查是否应该回复
+    should_reply = False
+
+    # 缓冲区达到阈值（2条消息）
+    if len(state.buffer) >= 2:
+        should_reply = True
+
+    # 保底回复：距上次回复超过 30 秒
+    if state.last_reply_time > 0 and time.time() - state.last_reply_time >= 30:
+        should_reply = True
+
+    # 首条消息直接回复
+    if state.last_reply_time == 0:
+        should_reply = True
+
+    if not should_reply:
         return
-    if personality.check_forbidden(reply):
-        return
 
-    reply = humanizer.post_process_reply(reply)
-    if humanizer.is_rejected(reply):
-        return
-    await typing_delay(reply)
-    await send_private_split(event.user_id, reply)
-    _private_reply_count[event.user_id] = count + 1
-    _private_last_reply[event.user_id] = time.time()
-
-    await group_memory.save_message(
-        0, settings.bot_qq_id, personality.name, reply, is_bot=True
-    )
-    await relationship.update_closeness(event.user_id, 0.02)
+    # 处理缓冲区
+    buffered = state.buffer.copy()
+    state.buffer.clear()
+    await _process_private_buffer(event.user_id, buffered)
 
 
 @app.websocket("/onebot/ws")

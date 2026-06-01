@@ -95,9 +95,5 @@ class Settings(BaseSettings):
     def typing_delay_per_char(self) -> float:
         return 0.2 if self.high_resource_mode else 0.3
 
-    @property
-    def private_reply_limit(self) -> int:
-        return 999999 if self.high_resource_mode else 15  # 高耗模式取消限制
-
 
 settings = Settings()

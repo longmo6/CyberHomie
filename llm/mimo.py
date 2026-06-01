@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
@@ -54,6 +55,19 @@ class LLMClient:
         self.vision_model = settings.mimo_vision_model
         self.settings = settings
 
+    async def _call_with_retry(self, func, *args, max_retries=3, **kwargs):
+        """带重试的 API 调用（429 时指数退避）"""
+        for attempt in range(max_retries):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    wait = 2 ** attempt * 2  # 2s, 4s, 8s
+                    print(f"[LLM] Rate limited, retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+
     @staticmethod
     def _build_content(text: str, images: list[str] = None) -> str | list:
         """Build multimodal content if images are present."""
@@ -76,7 +90,7 @@ class LLMClient:
         messages.append({"role": "user", "content": user_message})
 
         try:
-            resp = await self.client.chat.completions.create(
+            resp = await self._call_with_retry(self.client.chat.completions.create,
                 model=self.model,
                 messages=messages,
                 temperature=0.85,
@@ -112,7 +126,7 @@ class LLMClient:
             prompt += f"{sender}: {content}\n"
 
         try:
-            resp = await self.client.chat.completions.create(
+            resp = await self._call_with_retry(self.client.chat.completions.create,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
@@ -144,7 +158,7 @@ class LLMClient:
             prompt += f"{content}\n"
 
         try:
-            resp = await self.client.chat.completions.create(
+            resp = await self._call_with_retry(self.client.chat.completions.create,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
@@ -170,7 +184,8 @@ class LLMClient:
             content.append({"type": "image_url", "image_url": {"url": url}})
         content.append({"type": "text", "text": "简短描述这张图片的内容，一句话即可。"})
         try:
-            resp = await self.client.chat.completions.create(
+            resp = await self._call_with_retry(
+                self.client.chat.completions.create,
                 model=self.vision_model,
                 messages=[{"role": "user", "content": content}],
                 max_completion_tokens=200,
@@ -237,7 +252,7 @@ class LLMClient:
         messages_for_llm.append({"role": "user", "content": prompt})
 
         try:
-            resp = await self.client.chat.completions.create(
+            resp = await self._call_with_retry(self.client.chat.completions.create,
                 model=self.model,
                 messages=messages_for_llm,
                 temperature=0.85,
@@ -282,7 +297,7 @@ class LLMClient:
         messages_for_llm.append({"role": "user", "content": prompt})
 
         try:
-            resp = await self.client.chat.completions.create(
+            resp = await self._call_with_retry(self.client.chat.completions.create,
                 model=self.model,
                 messages=messages_for_llm,
                 temperature=0.9,
@@ -324,7 +339,7 @@ class LLMClient:
         messages_for_llm.append({"role": "user", "content": prompt})
 
         try:
-            resp = await self.client.chat.completions.create(
+            resp = await self._call_with_retry(self.client.chat.completions.create,
                 model=self.model,
                 messages=messages_for_llm,
                 temperature=0.9,
