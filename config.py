@@ -79,5 +79,25 @@ class Settings(BaseSettings):
     def profile_update_interval_hours(self) -> int:
         return 3 if self.high_resource_mode else 6
 
+    @property
+    def guaranteed_reply_interval(self) -> float:
+        return 25.0 if self.high_resource_mode else 40.0
+
+    @property
+    def at_charges_limit(self) -> int:
+        return 5 if self.high_resource_mode else 2
+
+    @property
+    def at_recharge_seconds(self) -> int:
+        return 480 if self.high_resource_mode else 900  # 8min vs 15min
+
+    @property
+    def typing_delay_per_char(self) -> float:
+        return 0.2 if self.high_resource_mode else 0.3
+
+    @property
+    def private_reply_limit(self) -> int:
+        return 999999 if self.high_resource_mode else 15  # 高耗模式取消限制
+
 
 settings = Settings()

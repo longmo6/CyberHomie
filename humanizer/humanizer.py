@@ -92,7 +92,7 @@ class GroupState:
     fatigue_set_time: float = 0.0     # 疲惫值设定时间（独立衰减）
     reply_count: int = 0              # 本轮已回复次数
     at_count: int = 0                 # 连续被@次数（session内）
-    at_charges: int = 2              # 沉默期@回复机会（上限2，每15分钟恢复1）
+    at_charges: int = 5              # 沉默期@回复机会（默认值，实际由配置决定）
     at_last_recharge: float = 0.0    # 上次恢复时间
     active_users: set = field(default_factory=set)  # 本轮被回复过的用户ID
     session: Optional[ConversationSession] = None  # session 内滚动对话窗口
@@ -104,6 +104,9 @@ class Humanizer:
         self.active_hour_start = settings.active_hour_start
         self.active_hour_end = settings.active_hour_end
         self._session_max_messages = settings.session_max_messages
+        self._guaranteed_reply_interval = settings.guaranteed_reply_interval
+        self._at_charges_limit = settings.at_charges_limit
+        self._at_recharge_seconds = settings.at_recharge_seconds
 
         # 每群独立状态（group_id -> GroupState）
         self._groups: Dict[int, GroupState] = {}
@@ -119,6 +122,7 @@ class Humanizer:
         """获取或创建群状态"""
         if group_id not in self._groups:
             state = GroupState()
+            state.at_charges = self._at_charges_limit
             self._schedule_next_session(state)
             self._groups[group_id] = state
         return self._groups[group_id]
@@ -188,21 +192,21 @@ class Humanizer:
         # 沉默期：先恢复充能
         if state.at_last_recharge > 0:
             elapsed = now - state.at_last_recharge
-            gained = int(elapsed / 900)  # 每15分钟恢复1
+            gained = int(elapsed / self._at_recharge_seconds)
             if gained > 0:
-                state.at_charges = min(2, state.at_charges + gained)
+                state.at_charges = min(self._at_charges_limit, state.at_charges + gained)
                 state.at_last_recharge = now
         else:
             state.at_last_recharge = now
 
         if state.at_charges <= 0:
-            logger.info("[Group %d] @ no charges left (0/2)", group_id)
+            logger.info("[Group %d] @ no charges left (0/%d)", group_id, self._at_charges_limit)
             return False
 
         # 消耗1次
         state.at_charges -= 1
         state.at_last_recharge = now
-        logger.info("[Group %d] @ reply (%d/2 charges left)", group_id, state.at_charges)
+        logger.info("[Group %d] @ reply (%d/%d charges left)", group_id, state.at_charges, self._at_charges_limit)
         return True
 
     def record_replied_user(self, group_id: int, user_id: int):
@@ -290,10 +294,10 @@ class Humanizer:
             state.buffer.clear()
             return messages
 
-        # 保底回复：缓冲区有消息 + 距上次回复超过 40 秒 → 强制刷新
+        # 保底回复：缓冲区有消息 + 距上次回复超过阈值 → 强制刷新
         if state.buffer and state.last_reply_time > 0:
             elapsed = time.time() - state.last_reply_time
-            if elapsed >= GUARANTEED_REPLY_INTERVAL:
+            if elapsed >= self._guaranteed_reply_interval:
                 messages = state.buffer.copy()
                 state.buffer.clear()
                 return messages
@@ -310,7 +314,7 @@ class Humanizer:
             if not self.is_active(gid):
                 continue
             elapsed = now - state.last_reply_time
-            if elapsed >= GUARANTEED_REPLY_INTERVAL:
+            if elapsed >= self._guaranteed_reply_interval:
                 messages = state.buffer.copy()
                 state.buffer.clear()
                 result.append((gid, messages))
@@ -364,7 +368,7 @@ class Humanizer:
             state.fatigue_set_time = 0
             state.reply_count = 0
             state.at_count = 0
-            state.at_charges = 2
+            state.at_charges = self._at_charges_limit
             state.at_last_recharge = 0
             state.active_users.clear()
             state.last_reply_time = 0
@@ -383,7 +387,7 @@ class Humanizer:
             state.fatigue_set_time = now
             state.reply_count = 0
             state.at_count = 0
-            state.at_charges = 2
+            state.at_charges = self._at_charges_limit
             state.next_session_time = 0  # 清零，用于标记 session 进行中
             state.at_last_recharge = 0
             state.active_users.clear()
@@ -407,7 +411,7 @@ class Humanizer:
         state.fatigue_set_time = now
         state.reply_count = 0
         state.at_count = 0
-        state.at_charges = 2
+        state.at_charges = self._at_charges_limit
         state.next_session_time = 0
         state.at_last_recharge = 0
         state.active_users.clear()

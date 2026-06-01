@@ -164,6 +164,7 @@ class LLMClient:
         """用 vision 模型描述图片内容，返回简短描述"""
         if not images:
             return ""
+        print(f"[LLM] describe_images ({self.vision_model}): 处理 {len(images)} 张图片...")
         content = []
         for url in images:
             content.append({"type": "image_url", "image_url": {"url": url}})

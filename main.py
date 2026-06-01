@@ -211,7 +211,7 @@ async def dashboard_loop():
 # --- 私聊参与度 ---
 _private_reply_count: Dict[int, int] = {}  # user_id -> 连续回复次数
 _private_last_reply: Dict[int, float] = {}  # user_id -> 上次回复时间
-_PRIVATE_MAX_REPLIES = 15  # 连续回复超过此数停止回复
+_PRIVATE_MAX_REPLIES = settings.private_reply_limit  # 高耗模式下为999999（无限制）
 _PRIVATE_COOLDOWN = 1800   # 停止后冷却30分钟
 
 
@@ -275,8 +275,9 @@ async def on_session_start(group_id: int):
 
 # --- Typing delay ---
 async def typing_delay(text: str):
-    """模拟打字延迟：每字0.3秒，范围3-10秒，随机0-1秒"""
-    base = len(text) * 0.3
+    """模拟打字延迟"""
+    per_char = settings.typing_delay_per_char
+    base = len(text) * per_char
     delay = min(10.0, max(3.0, base)) + random.uniform(0, 1.0)
     await asyncio.sleep(delay)
 
@@ -486,11 +487,14 @@ async def handle_group_message(event: GroupMessageEvent):
         msg_text = f"{msg_text} [表情包]" if msg_text else "[表情包]"
     if event.images and not event.has_sticker:
         if settings.high_resource_mode:
+            print(f"[群{event.group_id}] 图片入: {event.images}")
             img_desc = await llm_client.describe_images(event.images)
             if img_desc and img_desc != "[图片]":
                 msg_text = f"{msg_text} [图片: {img_desc}]" if msg_text else f"[图片: {img_desc}]"
             else:
                 msg_text = f"{msg_text} [图片]" if msg_text else "[图片]"
+            # 同步更新 event.raw_text，让缓冲区也用新文本
+            event.raw_text = msg_text
         else:
             msg_text = f"{msg_text} [图片]" if msg_text else "[图片]"
 
@@ -521,6 +525,14 @@ async def handle_group_message(event: GroupMessageEvent):
                 # 低耗模式：session 启动时补全历史图片描述
                 if not settings.high_resource_mode:
                     await _enrich_recent_chat_images(event.group_id)
+                    # 同步更新 pending 消息的文本（可能包含未描述的图片）
+                    for m in pending:
+                        if m.images and "[图片]" in m.text and "[图片:" not in m.text:
+                            recent = _get_recent_chat(event.group_id)
+                            for rmsg in recent:
+                                if rmsg["content"].startswith(f'[{event.nickname}]'):
+                                    m.text = rmsg["content"].replace(f'[{event.nickname}] ', '', 1)
+                                    break
                 # 预填充滚动容器历史到 session
                 recent = _get_recent_chat(event.group_id)
                 for msg in recent:
@@ -531,6 +543,7 @@ async def handle_group_message(event: GroupMessageEvent):
 
     # 低耗模式活跃期：处理当前消息的图片
     if not settings.high_resource_mode and event.images and not event.has_sticker:
+        print(f"[群{event.group_id}] 图片入: {event.images}")
         img_desc = await llm_client.describe_images(event.images)
         if img_desc and img_desc != "[图片]":
             enriched = f'[{event.nickname}] {event.raw_text} [图片: {img_desc}]'
