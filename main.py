@@ -53,6 +53,8 @@ _last_group_msg_time: Dict[int, float] = {}
 _last_human_msg_time: Dict[int, float] = {}  # 仅记录人类消息时间
 _last_bot_msg_time: Dict[int, float] = {}    # 仅记录 bot 消息时间
 
+_PRIVATE_ENGAGEMENT_DECAY = 300.0  # 私聊参与度衰减时间（秒），100→0
+
 # --- 每群最近30条消息滚动容器（始终保存，不受活跃状态影响）---
 _recent_chat: Dict[int, list] = {}  # group_id -> [{"role": ..., "content": ..., "images": [...]}, ...]
 _RECENT_CHAT_LIMIT = 30
