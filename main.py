@@ -1,7 +1,6 @@
 import asyncio
 import random
 import re
-import subprocess
 import sys
 import time
 from collections import deque
@@ -15,6 +14,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from config import settings
 from core.event_handler import EventHandler, GroupMessageEvent, PrivateMessageEvent
 from core.napcat import NapCatAPIClient
+from core.onebot_manager import NapCatManager
 from core.scheduler import BackgroundScheduler
 from humanizer.humanizer import Humanizer, BufferedMessage
 from llm.mimo import LLMClient, ConversationSession
@@ -30,8 +30,9 @@ from utils.logger import setup_logger
 logger = setup_logger("main")
 
 # --- Initialize all components ---
-api_client = NapCatAPIClient(settings.napcat_http_url, settings.napcat_access_token)
+api_client = NapCatAPIClient(settings.onebot_http_url, settings.onebot_access_token)
 event_handler = EventHandler(settings)
+onebot_manager = NapCatManager(settings)
 humanizer = Humanizer(settings)
 personality = Personality()
 llm_client = LLMClient(settings)
@@ -44,7 +45,6 @@ group_file_memory = GroupFileMemory(db, llm_client, settings)
 recent_messages: deque[GroupMessageEvent] = deque(maxlen=50)
 scheduler = BackgroundScheduler(db, user_memory, group_memory, llm_client, settings)
 
-napcat_process: Optional[subprocess.Popen] = None
 loop: Optional[asyncio.AbstractEventLoop] = None
 
 
@@ -446,7 +446,7 @@ def build_group_context(group_id: int) -> str:
 # --- App lifecycle ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global napcat_process, loop
+    global loop
     loop = asyncio.get_event_loop()
     await db.initialize()
 
@@ -456,17 +456,12 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("CyberHomie started")
 
-    if settings.napcat_path:
-        import os
-        napcat_dir = os.path.dirname(settings.napcat_path)
-        napcat_process = subprocess.Popen(
-            settings.napcat_path,
-            cwd=napcat_dir if napcat_dir else None,
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
-        )
-        logger.info("NapCat launched (pid=%d)", napcat_process.pid)
+    # 启动 OneBot 后端
+    if await onebot_manager.ensure_installed():
+        onebot_manager.generate_config()
+        await onebot_manager.start()
     else:
-        logger.info("NAPCAT_PATH not set, start NapCat manually")
+        logger.warning("OneBot not installed, run 'python setup.py' first")
 
     import threading
     terminal_thread = threading.Thread(target=terminal_loop, daemon=True)
@@ -482,9 +477,7 @@ async def lifespan(app: FastAPI):
     guarantee_task.cancel()
     dash_task.cancel()
 
-    if napcat_process and napcat_process.poll() is None:
-        napcat_process.terminate()
-        logger.info("NapCat terminated")
+    await onebot_manager.stop()
     scheduler.shutdown()
     await llm_client.close()
     await api_client.close()
@@ -717,6 +710,11 @@ async def onebot_ws(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
+
+            # 调试：记录收到的事件类型
+            post_type = data.get("post_type", "")
+            msg_type = data.get("message_type", "")
+            logger.debug("WS event: post_type=%s message_type=%s", post_type, msg_type)
 
             group_event = event_handler.parse_group_message(data)
             if group_event:

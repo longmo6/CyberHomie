@@ -5,9 +5,8 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # NapCat
-    napcat_ws_url: str = "ws://127.0.0.1:3001"
-    napcat_http_url: str = "http://127.0.0.1:3000"
-    napcat_access_token: str = ""
+    onebot_http_url: str = "http://127.0.0.1:3000"
+    onebot_access_token: str = ""
 
     # Bot identity
     bot_qq_id: int = 0
@@ -37,9 +36,6 @@ class Settings(BaseSettings):
     session_gap_max: int = 90
     session_duration_min: int = 3
     session_duration_max: int = 10
-
-    # NapCat launcher
-    napcat_path: str = ""
 
     # Database
     db_path: str = "data/cyberhomie.db"

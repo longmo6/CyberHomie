@@ -223,20 +223,32 @@ LLM 返回 JSON：`{"replies": [{"message_id": 123, "text": "回复", "quote": t
 ## 快速开始
 
 ```bash
+# 1. 克隆项目
+git clone https://github.com/yourname/cyberhomie.git
+cd cyberhomie
+
+# 2. 创建虚拟环境 & 安装依赖
+python -m venv .venv
+source .venv/Scripts/activate    # Windows Git Bash
+# 或 .venv\Scripts\activate      # Windows CMD
 pip install -r requirements.txt
-cp .env.example .env
-# 编辑 .env 填入配置
+
+# 3. 运行配置向导（自动下载 NapCat + 生成 .env）
+python setup.py
+
+# 4. 启动
 python main.py
 ```
 
-### NapCat 配置
+`setup.py` 会引导你完成：
+- 填写 Bot QQ 号、群号、LLM API Key（均可跳过，稍后编辑 `.env`）
+- 自动下载 NapCat Shell（112MB，内含 Node.js，一次性）
+- 自动生成 NapCat 配置（WebSocket 反向连接 + HTTP API）
+- 生成 `.env` 配置文件
 
-1. 下载 [NapCatQQ](https://napneko.github.io/)，扫码登录
-2. Web 面板（`http://127.0.0.1:6099`）配置：
-   - HTTP 服务器：端口 `3000`
-   - WebSocket 客户端：`ws://127.0.0.1:8765/onebot/ws`
-3. 消息格式：**Array**
-4. 配置 `NAPCAT_PATH` 可自动启动
+首次启动后 NapCat 会在终端显示二维码，手机 QQ 扫码登录即可。后续启动自动快速登录。
+
+> 也可以跳过 `setup.py`，手动下载 [NapCat](https://github.com/NapNeko/NapCatQQ/releases) 放到 `data/napcat/`，复制 `.env.example` 为 `.env` 并填写配置。
 
 ---
 
@@ -260,10 +272,12 @@ python main.py
 
 ```
 main.py                      入口 + 事件处理 + 终端指令
+setup.py                     快速配置向导（下载 NapCat + 生成配置）
 config.py                    环境配置（含资源模式切换）
 config/personality.yaml      人格配置
 core/
   napcat.py                  NapCat HTTP API 客户端
+  onebot_manager.py          NapCat 生命周期管理（启动/关闭/健康检查）
   event_handler.py           OneBot 11 事件解析
   scheduler.py               定时任务
 memory/
@@ -281,6 +295,11 @@ llm/
   mimo.py                    LLM 客户端（双模型）+ ConversationSession
 utils/
   logger.py                  日志
+data/
+  napcat/                    NapCat 运行目录（自动下载，git 忽略）
+  cyberhomie.db              SQLite 数据库
+  memory/                    用户长期记忆文件
+  group_memory/              群长期记忆文件
 ```
 
 ---
@@ -294,13 +313,15 @@ utils/
 | `BOT_QQ_ID` | 机器人 QQ 号 | - |
 | `TARGET_GROUP_IDS` | 目标群号（逗号分隔） | - |
 | `MIMO_API_KEY` | LLM API 密钥 | - |
-| `MIMO_BASE_URL` | API 地址 | `https://token-plan-cn.xiaomimimo.com/v1` |
+| `MIMO_BASE_URL` | API 地址 | `https://api.xiaomimimo.com/v1` |
 | `MIMO_MODEL` | 对话模型 | `mimo-v2.5-pro` |
 | `MIMO_VISION_MODEL` | 图片理解模型 | `mimo-v2.5` |
 | `HIGH_RESOURCE_MODE` | 资源模式 | `true` |
 | `ACTIVE_HOUR_START/END` | 活跃时段 | `10-2` |
-| `NAPCAT_PATH` | NapCat 启动器路径 | 空 |
-| `NAPCAT_ACCESS_TOKEN` | NapCat API Token | 空 |
+| `ONEBOT_HTTP_URL` | NapCat HTTP API 地址 | `http://127.0.0.1:3000` |
+| `ONEBOT_ACCESS_TOKEN` | NapCat API Token | 空 |
+
+> 运行 `python setup.py` 可交互式填写以上配置，也可手动编辑 `.env`。所有配置项均可在 `.env` 中随时修改，重启生效。
 
 ### 资源模式
 
@@ -377,6 +398,13 @@ utils/
 ## 技术栈
 
 Python 3.9+ / FastAPI / NapCat (OneBot 11) / aiosqlite / OpenAI 兼容 API / APScheduler
+
+### 依赖的外部服务
+
+| 服务 | 用途 | 配置 |
+|------|------|------|
+| [NapCat](https://github.com/NapNeko/NapCatQQ) | QQ 协议实现（OneBot 11） | `python setup.py` 自动下载 |
+| [小米 MiMo API](https://api.xiaomimimo.com/v1) | LLM 对话 + 图片理解 | `MIMO_API_KEY` |
 
 ## License
 

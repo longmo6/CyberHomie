@@ -4,11 +4,7 @@ __pycache__/
 dist/
 build/
 .env
-data/*.db
-data/*.db-wal
-data/*.db-shm
-data/memory/
-data/group_memory/
+data/
 .venv/
 venv/
 .idea/
