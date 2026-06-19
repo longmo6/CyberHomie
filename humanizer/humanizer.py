@@ -20,7 +20,7 @@ from typing import Callable, Awaitable, Optional, List, Dict
 
 from config import Settings
 from core.event_handler import GroupMessageEvent
-from llm.mimo import ConversationSession
+from llm.llm_client import ConversationSession
 from utils.logger import setup_logger
 
 logger = setup_logger("humanizer")

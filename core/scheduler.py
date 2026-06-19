@@ -1,7 +1,7 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import Settings
-from llm.mimo import LLMClient
+from llm.llm_client import LLMClient
 from memory.database import Database
 from memory.group_memory import GroupMemory
 from memory.user_memory import UserMemory

@@ -20,10 +20,10 @@ class Settings(BaseSettings):
         return {int(x.strip()) for x in self.target_group_ids.split(",") if x.strip()}
 
     # LLM
-    mimo_api_key: str = ""
-    mimo_base_url: str = "https://api.xiaomimimo.com/v1"
-    mimo_model: str = "mimo-v2.5-pro"
-    mimo_vision_model: str = "mimo-v2.5"
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.xiaomimimo.com/v1"
+    llm_model: str = "mimo-v2.5-pro"
+    llm_vision_model: str = "mimo-v2.5"
 
     # Resource mode: true = high (larger context, more frequent updates), false = low (save tokens)
     high_resource_mode: bool = True

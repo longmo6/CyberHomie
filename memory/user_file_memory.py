@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 
 from memory.database import Database
-from llm.mimo import LLMClient
+from llm.llm_client import LLMClient
 from utils.logger import setup_logger
 
 logger = setup_logger("user_file_memory")

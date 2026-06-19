@@ -17,7 +17,7 @@ from core.napcat import NapCatAPIClient
 from core.onebot_manager import NapCatManager
 from core.scheduler import BackgroundScheduler
 from humanizer.humanizer import Humanizer, BufferedMessage
-from llm.mimo import LLMClient, ConversationSession
+from llm.llm_client import LLMClient, ConversationSession
 from memory.database import Database
 from memory.group_memory import GroupMemory
 from memory.relationship import RelationshipGraph

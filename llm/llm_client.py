@@ -47,12 +47,12 @@ class ConversationSession:
 class LLMClient:
     def __init__(self, settings: Settings):
         self.client = AsyncOpenAI(
-            api_key=settings.mimo_api_key,
-            base_url=settings.mimo_base_url,
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
             timeout=Timeout(60.0, connect=10.0),
         )
-        self.model = settings.mimo_model
-        self.vision_model = settings.mimo_vision_model
+        self.model = settings.llm_model
+        self.vision_model = settings.llm_vision_model
         self.settings = settings
 
     async def _call_with_retry(self, func, *args, max_retries=3, **kwargs):

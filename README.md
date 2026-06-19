@@ -292,7 +292,7 @@ personality/
 humanizer/
   humanizer.py               参与度 + 缓冲阈值 + 疲惫值 + @充能 + 出没调度 + 保底回复
 llm/
-  mimo.py                    LLM 客户端（双模型）+ ConversationSession
+  llm_client.py              LLM 客户端（双模型）+ ConversationSession
 utils/
   logger.py                  日志
 data/
@@ -312,10 +312,10 @@ data/
 |--------|------|--------|
 | `BOT_QQ_ID` | 机器人 QQ 号 | - |
 | `TARGET_GROUP_IDS` | 目标群号（逗号分隔） | - |
-| `MIMO_API_KEY` | LLM API 密钥 | - |
-| `MIMO_BASE_URL` | API 地址 | `https://api.xiaomimimo.com/v1` |
-| `MIMO_MODEL` | 对话模型 | `mimo-v2.5-pro` |
-| `MIMO_VISION_MODEL` | 图片理解模型 | `mimo-v2.5` |
+| `LLM_API_KEY` | LLM API 密钥 | - |
+| `LLM_BASE_URL` | API 地址 | `https://api.xiaomimimo.com/v1` |
+| `LLM_MODEL` | 对话模型 | `mimo-v2.5-pro` |
+| `LLM_VISION_MODEL` | 图片理解模型 | `mimo-v2.5` |
 | `HIGH_RESOURCE_MODE` | 资源模式 | `true` |
 | `ACTIVE_HOUR_START/END` | 活跃时段 | `10-2` |
 | `ONEBOT_HTTP_URL` | NapCat HTTP API 地址 | `http://127.0.0.1:3000` |

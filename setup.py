@@ -169,10 +169,10 @@ def gen_env(bot_qq_id, group_ids, api_key, base_url, model, vision_model, http_p
         f"TARGET_GROUP_IDS={group_ids}",
         "",
         "# LLM",
-        f"MIMO_API_KEY={api_key}",
-        f"MIMO_BASE_URL={base_url}",
-        f"MIMO_MODEL={model}",
-        f"MIMO_VISION_MODEL={vision_model}",
+        f"LLM_API_KEY={api_key}",
+        f"LLM_BASE_URL={base_url}",
+        f"LLM_MODEL={model}",
+        f"LLM_VISION_MODEL={vision_model}",
         "",
         "# Resource mode: true = 高耗, false = 低耗",
         "HIGH_RESOURCE_MODE=true",
@@ -230,10 +230,10 @@ def main():
     print("  ℹ 留空则使用默认值，稍后可编辑 .env 或重新运行 setup.py")
     print()
 
-    api_key = ask("API Key", existing.get("MIMO_API_KEY", ""))
-    base_url = ask("Base URL", existing.get("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1"))
-    model = ask("模型", existing.get("MIMO_MODEL", "mimo-v2.5-pro"))
-    vision_model = ask("视觉模型 (图片理解)", existing.get("MIMO_VISION_MODEL", "mimo-v2.5"))
+    api_key = ask("API Key", existing.get("LLM_API_KEY", ""))
+    base_url = ask("Base URL", existing.get("LLM_BASE_URL", "https://api.xiaomimimo.com/v1"))
+    model = ask("模型", existing.get("LLM_MODEL", "mimo-v2.5-pro"))
+    vision_model = ask("视觉模型 (图片理解)", existing.get("LLM_VISION_MODEL", "mimo-v2.5"))
     print()
 
     # ── Step 3: 下载 NapCat ──
