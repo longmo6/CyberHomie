@@ -148,7 +148,11 @@ async def _process_private_buffer(user_id: int, buffered: list):
 
     user_message = "\n".join([f'{m["nickname"]}: {m["text"]}' for m in buffered])
 
-    reply = await llm_client.generate_reply(sys_prompt, session_msgs, user_message)
+    # LLM 推理与打字延迟并行执行
+    reply, _ = await asyncio.gather(
+        llm_client.generate_reply(sys_prompt, session_msgs, user_message),
+        _typing_delay_parallel(),
+    )
     if not reply:
         return
     if personality.check_forbidden(reply):
@@ -158,7 +162,6 @@ async def _process_private_buffer(user_id: int, buffered: list):
     if humanizer.is_rejected(reply):
         return
 
-    await typing_delay(reply)
     await send_private_split(user_id, reply)
     state.reply_count += 1
     state.last_reply_time = time.time()
@@ -337,8 +340,11 @@ async def on_session_start(group_id: int):
         logger.info("[Group %d] Session start skipped: last msg is bot's", group_id)
         return
 
-    # 根据最近聊天内容接话
-    text = await llm_client.generate_join_reply(sys_prompt, session_msgs)
+    # 根据最近聊天内容接话（LLM 推理与打字延迟并行）
+    text, _ = await asyncio.gather(
+        llm_client.generate_join_reply(sys_prompt, session_msgs),
+        _typing_delay_parallel(),
+    )
     if not text:
         print(f"[Bot][群{group_id}] join_reply: LLM returned empty")
         return
@@ -351,7 +357,6 @@ async def on_session_start(group_id: int):
         print(f"[Bot][群{group_id}] join_reply: rejected -> {text[:40]}")
         return
 
-    await typing_delay(text)
     await api_client.send_group_message(group_id, text)
     _last_bot_msg_time[group_id] = time.time()
     _add_recent_chat(group_id, "assistant", f'[小夜] {text}')
@@ -490,8 +495,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="CyberHomie", lifespan=lifespan)
 
 
+async def _typing_delay_parallel():
+    """并行打字延迟：固定最小延迟，与 LLM 推理同时进行"""
+    delay = random.uniform(3.0, 5.0)
+    await asyncio.sleep(delay)
+
+
 async def process_buffered_messages(group_id: int, pending: list, trigger_user_id: int = 0):
-    """处理缓冲区消息：存DB → 构建上下文 → LLM决策 → 发送回复"""
+    """处理缓冲区消息：存DB → 构建上下文 → LLM决策 + 打字延迟并行 → 发送回复"""
     state = humanizer._get_state(group_id)
     was_at = any(m.is_at_bot for m in pending)
 
@@ -524,7 +535,11 @@ async def process_buffered_messages(group_id: int, pending: list, trigger_user_i
         for m in pending
     ]
 
-    replies = await llm_client.decide_replies(sys_prompt, session_msgs, buffered_data)
+    # LLM 推理与打字延迟并行执行
+    replies, _ = await asyncio.gather(
+        llm_client.decide_replies(sys_prompt, session_msgs, buffered_data),
+        _typing_delay_parallel(),
+    )
 
     if not replies:
         print(f"[LLM] Group {group_id}: No reply needed")
@@ -544,7 +559,6 @@ async def process_buffered_messages(group_id: int, pending: list, trigger_user_i
             continue
         reply_to = msg_id if quote else 0
 
-        await typing_delay(text)
         await send_group_split(group_id, text, reply_to=reply_to)
         _last_bot_msg_time[group_id] = time.time()
         _add_recent_chat(group_id, "assistant", f'[小夜] {text}')
