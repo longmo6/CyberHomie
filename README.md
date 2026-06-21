@@ -10,7 +10,7 @@ CyberHomie 是一个基于大语言模型的拟人化社交智能体系统，旨
 - **拟人化行为**：动态参与度、疲惫值、随机出没、保底回复，模拟真实人类的在线模式
 - **双层记忆架构**：Session 滚动窗口（短期）+ 文件记忆系统（长期），支持上下文连贯对话
 - **社会关系感知**：亲密度系统、用户画像、群记忆，对不同群友有不同态度
-- **双模型协同**：Pro 模型负责文字理解和决策，Vision 模型负责图片等多模态理解
+- **双模型协同**：Pro 模型负责文字理解和决策，Vision 模型负责图片等多模态理解（支持任何 OpenAI 兼容 API）
 - **资源自适应**：高耗/低耗模式切换，平衡 API 成本与交互质量
 
 它的目标不是回答问题，而是**成为一个真实存在的赛博好友**。
@@ -176,7 +176,7 @@ session_check_loop（每 60 秒）
 
 ### 11. 图片理解
 
-双模型架构：vision 模型（mimo-v2.5）负责看图描述，pro 模型（mimo-v2.5-pro）负责文字理解和决策。
+双模型架构：vision 模型负责看图描述，pro 模型负责文字理解和决策。支持任何 OpenAI 兼容的视觉模型和对话模型。
 
 **高耗模式**（HIGH_RESOURCE_MODE=true）：
 ```
@@ -212,7 +212,7 @@ LLM 能看到：
 
 **上下文管理**：每次 LLM 调用都是无状态的，从 session 窗口取最近 N 条作为上下文。session 为空时回退到滚动容器或数据库历史。session 启动时从滚动容器预填充（低耗模式会先补全图片描述）。
 
-**双模型架构**：对话/决策/话题用 `mimo-v2.5-pro`，图片理解用 `mimo-v2.5`。
+**双模型架构**：对话/决策/话题用 Pro 模型，图片理解用 Vision 模型。默认配置为小米 MiMo，可替换为任何 OpenAI 兼容 API（如 GPT-4o、Claude、Gemini 等）。
 
 **调用日志**：所有 LLM 调用都会在终端输出 token 用量和模型名，失败时输出错误原因。
 
@@ -238,6 +238,46 @@ python setup.py
 
 # 4. 启动
 python main.py
+```
+
+### 本地大模型启动（可选）
+
+如果你想使用本地大模型而不是云端 API，可以使用以下脚本：
+
+**一键启动（推荐）**：
+```bash
+# 启动本地 LLM + CyberHomie
+python start.py
+```
+
+`start.py` 会自动：
+1. 启动本地文本模型（Qwen2.5-14B，端口 8080）
+2. 启动本地视觉模型（Qwen2-VL-2B，端口 8081，可选）
+3. 等待模型加载完成
+4. 启动 CyberHomie
+
+**手动启动 LLM**：
+```powershell
+# Windows PowerShell
+.\start_llm.ps1
+```
+
+**本地模型文件**：
+
+需要将模型文件放到 `C:\llm_model\` 目录：
+- `qwen2.5-14b-instruct-q4_k_m.gguf`（文本模型，必需）
+- `Qwen2-VL-2B-Instruct-Q4_K_M.gguf`（视觉模型，可选）
+- `mmproj-Qwen2-VL-2B-Instruct-f16.gguf`（视觉模型投影文件，可选）
+
+**配套 .env 配置**：
+```bash
+# 文本模型
+LLM_BASE_URL=http://127.0.0.1:8080/v1
+LLM_MODEL=qwen2.5-14b-instruct
+
+# 视觉模型（如果启动了的话）
+LLM_VISION_BASE_URL=http://127.0.0.1:8081/v1
+LLM_VISION_MODEL=Qwen2-VL-2B-Instruct
 ```
 
 `setup.py` 会引导你完成：
@@ -273,6 +313,8 @@ python main.py
 ```
 main.py                      入口 + 事件处理 + 终端指令
 setup.py                     快速配置向导（下载 NapCat + 生成配置）
+start.py                     一键启动本地 LLM + CyberHomie
+start_llm.ps1                Windows PowerShell 启动本地 LLM
 config.py                    环境配置（含资源模式切换）
 config/personality.yaml      人格配置
 core/
@@ -313,9 +355,10 @@ data/
 | `BOT_QQ_ID` | 机器人 QQ 号 | - |
 | `TARGET_GROUP_IDS` | 目标群号（逗号分隔） | - |
 | `LLM_API_KEY` | LLM API 密钥 | - |
-| `LLM_BASE_URL` | API 地址 | `https://api.xiaomimimo.com/v1` |
+| `LLM_BASE_URL` | API 地址（任何 OpenAI 兼容 API） | `https://api.xiaomimimo.com/v1` |
 | `LLM_MODEL` | 对话模型 | `mimo-v2.5-pro` |
 | `LLM_VISION_MODEL` | 图片理解模型 | `mimo-v2.5` |
+| `LLM_VISION_BASE_URL` | Vision 模型 API 地址（空则与 LLM_BASE_URL 相同） | 空 |
 | `HIGH_RESOURCE_MODE` | 资源模式 | `true` |
 | `ACTIVE_HOUR_START/END` | 活跃时段 | `10-2` |
 | `ONEBOT_HTTP_URL` | NapCat HTTP API 地址 | `http://127.0.0.1:3000` |
@@ -404,7 +447,38 @@ Python 3.9+ / FastAPI / NapCat (OneBot 11) / aiosqlite / OpenAI 兼容 API / APS
 | 服务 | 用途 | 配置 |
 |------|------|------|
 | [NapCat](https://github.com/NapNeko/NapCatQQ) | QQ 协议实现（OneBot 11） | `python setup.py` 自动下载 |
-| [小米 MiMo API](https://api.xiaomimimo.com/v1) | LLM 对话 + 图片理解 | `MIMO_API_KEY` |
+| LLM API（OpenAI 兼容） | 对话 + 图片理解 | `LLM_API_KEY` + `LLM_BASE_URL` |
+
+**支持的 LLM 提供商**（任何 OpenAI 兼容 API 均可）：
+- [小米 MiMo](https://api.xiaomimimo.com/v1)（默认）
+- [OpenAI](https://platform.openai.com/)（GPT-4o 等）
+- [Anthropic Claude](https://console.anthropic.com/)（通过 OpenAI 兼容层）
+- [Google Gemini](https://ai.google.dev/)（通过 OpenAI 兼容层）
+- [DeepSeek](https://platform.deepseek.com/)
+- [智谱 GLM](https://open.bigmodel.cn/)
+- 其他任何提供 OpenAI 兼容 API 的服务
+
+**本地部署**（可选）：
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) - 本地运行 GGUF 格式模型
+- 支持 Qwen、Llama、Mistral 等主流开源模型
+- 使用 `python start.py` 一键启动本地 LLM + CyberHomie
+
+**本地大模型支持**：
+
+可通过 `LLM_VISION_BASE_URL` 为 Vision 模型单独配置 API 地址，实现本地 + 云端混合部署：
+- 对话模型用云端 API（如 MiMo、GPT-4o）
+- Vision 模型用本地部署（如 Ollama、LM Studio、vLLM）
+
+示例配置（`.env`）：
+```bash
+# 对话用云端 MiMo
+LLM_BASE_URL=https://api.xiaomimimo.com/v1
+LLM_MODEL=mimo-v2.5-pro
+
+# 图片理解用本地 Ollama
+LLM_VISION_BASE_URL=http://localhost:11434/v1
+LLM_VISION_MODEL=llava:13b
+```
 
 ## License
 
