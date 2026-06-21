@@ -51,6 +51,12 @@ class LLMClient:
             base_url=settings.llm_base_url,
             timeout=Timeout(60.0, connect=10.0),
         )
+        vision_base = getattr(settings, "llm_vision_base_url", "") or settings.llm_base_url
+        self.vision_client = AsyncOpenAI(
+            api_key=settings.llm_api_key,
+            base_url=vision_base,
+            timeout=Timeout(60.0, connect=10.0),
+        )
         self.model = settings.llm_model
         self.vision_model = settings.llm_vision_model
         self.settings = settings
@@ -89,6 +95,8 @@ class LLMClient:
         messages.extend(chat_history[-self.settings.ctx_private:])
         messages.append({"role": "user", "content": user_message})
 
+        import time
+        t0 = time.time()
         try:
             resp = await self._call_with_retry(self.client.chat.completions.create,
                 model=self.model,
@@ -96,19 +104,21 @@ class LLMClient:
                 temperature=0.85,
                 top_p=0.9,
             )
+            elapsed = time.time() - t0
             choice = resp.choices[0]
             content = choice.message.content
             usage = getattr(resp, "usage", None)
             if usage:
-                print(f"[LLM] generate_reply ({self.model}): prompt={usage.prompt_tokens}, completion={usage.completion_tokens}")
+                print(f"[LLM] generate_reply ({elapsed:.1f}s, {self.model}): prompt={usage.prompt_tokens}, completion={usage.completion_tokens}")
             if not content:
                 reason = getattr(choice, "finish_reason", "unknown")
                 print(f"[LLM] generate_reply: content=None, finish_reason={reason}")
                 return ""
             return content.strip()
         except Exception as e:
-            logger.error("LLM call failed: %s", e)
-            print(f"[LLM] generate_reply error: {e}")
+            elapsed = time.time() - t0
+            logger.error("LLM call failed (%.1fs): %s", elapsed, e)
+            print(f"[LLM] generate_reply error ({elapsed:.1f}s): {e}")
             return ""
 
     async def summarize_chat(self, messages: list[dict]) -> str:
@@ -175,29 +185,36 @@ class LLMClient:
             return {}
 
     async def describe_images(self, images: list[str]) -> str:
-        """用 vision 模型描述图片内容，返回简短描述"""
+        """用 vision 模型描述图片内容，返回详细描述"""
         if not images:
             return ""
+        import time
+        t0 = time.time()
         print(f"[LLM] describe_images ({self.vision_model}): 处理 {len(images)} 张图片...")
         content = []
         for url in images:
             content.append({"type": "image_url", "image_url": {"url": url}})
-        content.append({"type": "text", "text": "简短描述这张图片的内容，一句话即可。"})
+        content.append({"type": "text", "text": (
+            "详细描述这张图片的内容，包括：场景/环境、主要人物或物体、"
+            "表情/动作、文字/水印、整体氛围。2-3句话，突出有趣的细节。"
+        )})
         try:
             resp = await self._call_with_retry(
-                self.client.chat.completions.create,
+                self.vision_client.chat.completions.create,
                 model=self.vision_model,
                 messages=[{"role": "user", "content": content}],
-                max_completion_tokens=200,
+                max_completion_tokens=500,
                 temperature=0.3,
             )
             desc = resp.choices[0].message.content
             result = desc.strip() if desc else "[图片]"
-            print(f"[LLM] describe_images ({self.vision_model}): {result}")
+            elapsed = time.time() - t0
+            print(f"[LLM] describe_images ({elapsed:.1f}s): {result}")
             return result
         except Exception as e:
-            logger.error("describe_images failed: %s", e)
-            print(f"[LLM] describe_images error: {e}")
+            elapsed = time.time() - t0
+            logger.error("describe_images failed (%.1fs): %s", elapsed, e)
+            print(f"[LLM] describe_images error ({elapsed:.1f}s): {e}")
             return "[图片]"
 
     async def decide_replies(
@@ -251,6 +268,8 @@ class LLMClient:
         messages_for_llm.extend(session_messages[-self.settings.ctx_group:])
         messages_for_llm.append({"role": "user", "content": prompt})
 
+        import time
+        t0 = time.time()
         try:
             resp = await self._call_with_retry(self.client.chat.completions.create,
                 model=self.model,
@@ -259,22 +278,24 @@ class LLMClient:
                 top_p=0.9,
                 response_format={"type": "json_object"},
             )
+            elapsed = time.time() - t0
             choice = resp.choices[0]
             content = choice.message.content
             usage = getattr(resp, "usage", None)
             if usage:
-                print(f"[LLM] decide_replies ({self.model}): prompt={usage.prompt_tokens}, completion={usage.completion_tokens}")
+                print(f"[LLM] decide_replies ({elapsed:.1f}s, {self.model}): prompt={usage.prompt_tokens}, completion={usage.completion_tokens}")
             if not content:
                 reason = getattr(choice, "finish_reason", "unknown")
                 print(f"[LLM] decide_replies: content=None, finish_reason={reason}")
                 return []
             data = json.loads(content)
             replies = data.get("replies", [])
-            print(f"[LLM] decide_replies: {len(replies)} replies")
+            print(f"[LLM] decide_replies ({elapsed:.1f}s): {len(replies)} replies")
             return replies
         except Exception as e:
-            logger.error("decide_replies failed: %s", e)
-            print(f"[LLM] decide_replies error: {e}")
+            elapsed = time.time() - t0
+            logger.error("decide_replies failed (%.1fs): %s", elapsed, e)
+            print(f"[LLM] decide_replies error ({elapsed:.1f}s): {e}")
             return []
 
     async def generate_topic(
@@ -362,3 +383,4 @@ class LLMClient:
 
     async def close(self):
         await self.client.close()
+        await self.vision_client.close()

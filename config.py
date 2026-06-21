@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.xiaomimimo.com/v1"
     llm_model: str = "mimo-v2.5-pro"
     llm_vision_model: str = "mimo-v2.5"
+    llm_vision_base_url: str = ""  # 空则与 llm_base_url 相同
 
     # Resource mode: true = high (larger context, more frequent updates), false = low (save tokens)
     high_resource_mode: bool = True

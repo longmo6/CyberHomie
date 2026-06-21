@@ -12,6 +12,3 @@ venv/
 *.log
 loadNapCat.js
 napcat.mjs
-start_llm.ps1
-start_llm.bat
-start.py
